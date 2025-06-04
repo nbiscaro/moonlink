@@ -1,7 +1,12 @@
 use crate::pg_replicate::conversions::cdc_event::CdcEventConversionError;
 use crate::pg_replicate::moonlink_sink::Sink;
 use crate::pg_replicate::postgres_source::CdcStream;
-use crate::pg_replicate::postgres_source::{CdcStreamError, PostgresSource, TableNamesFrom};
+use crate::pg_replicate::postgres_source::{
+    CdcStreamError,
+    PostgresSource,
+    PostgresSourceError,
+    TableNamesFrom,
+};
 use crate::pg_replicate::table_init::build_table_components;
 use crate::Result;
 use moonlink::{IcebergTableEventManager, ReadStateManager};
@@ -19,6 +24,7 @@ use std::path::Path;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_postgres::{connect, Client, Config, NoTls};
+use tracing::warn;
 
 pub enum Command {
     AddTable {
@@ -52,10 +58,11 @@ impl ReplicationConnection {
         table_base_path: String,
         table_temp_files_directory: String,
     ) -> Result<Self> {
-        let (postgres_client, connection) = connect(&uri, NoTls).await.unwrap();
+        let (postgres_client, connection) =
+            connect(&uri, NoTls).await.map_err(PostgresSourceError::from)?;
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                panic!("connection error: {}", e);
+                warn!("connection error: {}", e);
             }
         });
         postgres_client
@@ -63,7 +70,7 @@ impl ReplicationConnection {
                 "DROP PUBLICATION IF EXISTS moonlink_pub; CREATE PUBLICATION moonlink_pub;",
             )
             .await
-            .unwrap();
+            .map_err(PostgresSourceError::from)?;
 
         let db_name = uri
             .parse::<Config>()
