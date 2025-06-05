@@ -2792,8 +2792,10 @@ dependencies = [
 name = "moonlink_backend"
 version = "0.0.1"
 dependencies = [
+ "arrow-array",
  "moonlink",
  "moonlink_connectors",
+ "parquet",
  "tempfile",
  "thiserror 2.0.12",
  "tokio",
