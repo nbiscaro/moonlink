@@ -2,10 +2,7 @@ use crate::pg_replicate::conversions::cdc_event::CdcEventConversionError;
 use crate::pg_replicate::moonlink_sink::Sink;
 use crate::pg_replicate::postgres_source::CdcStream;
 use crate::pg_replicate::postgres_source::{
-    CdcStreamError,
-    PostgresSource,
-    PostgresSourceError,
-    TableNamesFrom,
+    CdcStreamError, PostgresSource, PostgresSourceError, TableNamesFrom,
 };
 use crate::pg_replicate::table_init::build_table_components;
 use crate::Result;
@@ -58,8 +55,9 @@ impl ReplicationConnection {
         table_base_path: String,
         table_temp_files_directory: String,
     ) -> Result<Self> {
-        let (postgres_client, connection) =
-            connect(&uri, NoTls).await.map_err(PostgresSourceError::from)?;
+        let (postgres_client, connection) = connect(&uri, NoTls)
+            .await
+            .map_err(PostgresSourceError::from)?;
         tokio::spawn(async move {
             if let Err(e) = connection.await {
                 warn!("connection error: {}", e);
