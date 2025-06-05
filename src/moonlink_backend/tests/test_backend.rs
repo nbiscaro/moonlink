@@ -27,7 +27,7 @@ mod tests {
 
     /// Read the first column of a Parquet file into a `Vec<Option<i64>>`.
     fn read_ids_from_parquet(path: &str) -> Vec<Option<i64>> {
-        let file = File::open(path).expect(&format!("open {path}"));
+        let file = File::open(path).unwrap_or_else(|_| panic!("open {path}"));
         let reader = ParquetRecordBatchReaderBuilder::try_new(file)
             .unwrap()
             .build()

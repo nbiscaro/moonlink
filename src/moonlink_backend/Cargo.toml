@@ -13,6 +13,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+serial_test = "3.0"
 tempfile = { workspace = true }
 tokio-postgres = { workspace = true }
-serial_test = "3.0"
