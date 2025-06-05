@@ -7,12 +7,14 @@ mod tests {
     use moonlink_backend::ReadState;
     use moonlink_backend::DEFAULT_MOONLINK_TEMP_FILE_PATH;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use serial_test::serial;
     use std::collections::HashSet;
     use std::fs::File;
     use tempfile::TempDir;
     use tokio_postgres::{connect, types::PgLsn, Client, NoTls};
 
     #[test]
+    #[serial]
     fn test_recreate_directory() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("temp_file.txt");
@@ -140,6 +142,7 @@ mod tests {
 
     // Test table creation and drop.
     #[tokio::test]
+    #[serial]
     async fn test_moonlink_service() {
         let temp_dir = TempDir::new().expect("tempdir failed");
         let uri = "postgresql://postgres:postgres@postgres:5432/postgres";
@@ -159,6 +162,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_scan_returns_inserted_rows() {
         let (temp_dir, service, client) = setup_backend("scan_test").await;
 
@@ -188,6 +192,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_scan_table_with_lsn() {
         let (_temp_dir, service, client) = setup_backend("lsn_test").await;
 
@@ -214,6 +219,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_create_iceberg_snapshot() {
         let (temp_dir, service, client) = setup_backend("snapshot_test").await;
 
