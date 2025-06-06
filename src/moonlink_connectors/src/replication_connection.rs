@@ -47,6 +47,7 @@ pub struct ReplicationConnection {
     cmd_rx: Option<mpsc::Receiver<Command>>,
     replication_state: Arc<ReplicationState>,
     source: PostgresSource,
+    replication_started: bool,
 }
 
 impl ReplicationConnection {
@@ -103,7 +104,12 @@ impl ReplicationConnection {
             cmd_rx: Some(cmd_rx),
             replication_state: ReplicationState::new(),
             source: postgres_source,
+            replication_started: false,
         })
+    }
+
+    pub fn replication_started(&self) -> bool {
+        self.replication_started
     }
 
     async fn alter_table_replica_identity(&self, table_name: &str) -> Result<()> {
@@ -241,13 +247,15 @@ impl ReplicationConnection {
         self.cmd_tx = tx;
         self.cmd_rx = Some(rx);
 
+        for schema in table_schemas.values() {
+            self.add_table_to_replication(schema).await?;
+        }
+
         let sink = Sink::new(self.replication_state.clone());
         let receiver = self.cmd_rx.take().unwrap();
         self.handle = Some(self.spawn_replication_task(sink, receiver).await);
 
-        for schema in table_schemas.values() {
-            self.add_table_to_replication(schema).await?;
-        }
+        self.replication_started = true;
 
         Ok(())
     }
@@ -291,7 +299,7 @@ async fn run_event_loop(
 
     loop {
         tokio::select! {
-             _ = status_interval.tick() => {
+            _ = status_interval.tick() => {
                 let _ = stream.as_mut().send_status_update(last_lsn).await;
             },
             Some(cmd) = cmd_rx.recv() => match cmd {
