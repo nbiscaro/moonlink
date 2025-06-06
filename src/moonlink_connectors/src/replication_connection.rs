@@ -300,7 +300,11 @@ async fn run_event_loop(
     loop {
         tokio::select! {
             _ = status_interval.tick() => {
-                let _ = stream.as_mut().send_status_update(last_lsn).await;
+                stream
+                    .as_mut()
+                    .send_status_update(last_lsn)
+                    .await
+                    .expect("failed to send status update");
             },
             Some(cmd) = cmd_rx.recv() => match cmd {
                 Command::AddTable { table_id, schema, event_sender, commit_lsn_tx } => {
@@ -313,15 +317,15 @@ async fn run_event_loop(
                 }
             },
             event = StreamExt::next(&mut stream) => {
-                let Some(event) = event else { break; };
+                let Some(event) = event else {
+                    panic!("replication stream ended unexpectedly");
+                };
                 if let Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MissingSchema(_))) = &event {
-                    continue;
+                    panic!("missing schema for replication event");
                 }
                 let event = event?;
                 last_lsn = sink.process_cdc_event(event).await.unwrap();
             }
         }
     }
-
-    Ok(())
 }
