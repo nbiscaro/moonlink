@@ -44,6 +44,7 @@ pub struct ReplicationConnection {
     cmd_rx: Option<mpsc::Receiver<Command>>,
     replication_state: Arc<ReplicationState>,
     source: PostgresSource,
+    replication_started: bool,
 }
 
 impl ReplicationConnection {
@@ -100,7 +101,12 @@ impl ReplicationConnection {
             cmd_rx: Some(cmd_rx),
             replication_state: ReplicationState::new(),
             source: postgres_source,
+            replication_started: false,
         })
+    }
+
+    pub fn replication_started(&self) -> bool {
+        self.replication_started
     }
 
     async fn alter_table_replica_identity(&self, table_name: &str) -> Result<()> {
@@ -238,13 +244,13 @@ impl ReplicationConnection {
         self.cmd_tx = tx;
         self.cmd_rx = Some(rx);
 
-        let sink = Sink::new(self.replication_state.clone());
-        let receiver = self.cmd_rx.take().unwrap();
-        self.handle = Some(self.spawn_replication_task(sink, receiver).await);
-
         for schema in table_schemas.values() {
             self.add_table_to_replication(schema).await?;
         }
+
+        let sink = Sink::new(self.replication_state.clone());
+        let receiver = self.cmd_rx.take().unwrap();
+        self.handle = Some(self.spawn_replication_task(sink, receiver).await);
 
         Ok(())
     }
