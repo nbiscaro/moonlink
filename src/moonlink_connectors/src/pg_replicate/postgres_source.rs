@@ -284,6 +284,11 @@ impl CdcStream {
         let this = self.project();
         this.table_schemas.insert(schema.table_id, schema);
     }
+
+    pub fn remove_table_schema(self: Pin<&mut Self>, table_id: TableId) {
+        let this = self.project();
+        this.table_schemas.remove(&table_id);
+    }
 }
 
 impl Stream for CdcStream {
