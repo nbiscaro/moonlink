@@ -309,6 +309,7 @@ async fn run_event_loop(
                 }
                 Command::DropTable { table_id } => {
                     sink.drop_table(table_id);
+                    stream.as_mut().remove_table_schema(table_id);
                 }
             },
             event = StreamExt::next(&mut stream) => {
