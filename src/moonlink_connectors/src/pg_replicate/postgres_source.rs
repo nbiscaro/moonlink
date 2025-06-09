@@ -52,6 +52,7 @@ pub struct PostgresSource {
     table_schemas: HashMap<TableId, TableSchema>,
     slot_name: Option<String>,
     publication: Option<String>,
+    confirmed_flush_lsn: PgLsn,
     uri: String,
 }
 
@@ -63,8 +64,12 @@ impl PostgresSource {
     ) -> Result<PostgresSource, PostgresSourceError> {
         let mut replication_client = ReplicationClient::connect_no_tls(uri).await?;
         replication_client.begin_readonly_transaction().await?;
+        let mut confirmed_flush_lsn = PgLsn::from(0);
         if let Some(ref slot_name) = slot_name {
-            replication_client.get_or_create_slot(slot_name).await?;
+            confirmed_flush_lsn = replication_client
+                .get_or_create_slot(slot_name)
+                .await?
+                .confirmed_flush_lsn;
         }
         let (table_names, publication) =
             Self::get_table_names_and_publication(&replication_client, table_names_from).await?;
@@ -76,6 +81,7 @@ impl PostgresSource {
             table_schemas,
             publication,
             slot_name,
+            confirmed_flush_lsn,
             uri: uri.to_string(),
         })
     }
@@ -86,6 +92,10 @@ impl PostgresSource {
 
     fn slot_name(&self) -> Option<&String> {
         self.slot_name.as_ref()
+    }
+
+    pub fn confirmed_flush_lsn(&self) -> PgLsn {
+        self.confirmed_flush_lsn
     }
 
     async fn get_table_names_and_publication(
