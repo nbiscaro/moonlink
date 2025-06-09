@@ -79,6 +79,11 @@ impl<T: Eq + Hash> ReplicationManager<T> {
         let (table_uri, table_id) = &self.table_info.get(&external_table_id).unwrap();
         let repl_conn = self.connections.get_mut(table_uri).unwrap();
         repl_conn.drop_table(*table_id).await?;
+        if repl_conn.table_readers_count() == 0 {
+            repl_conn.drop_publication().await?;
+            repl_conn.drop_replication_slot().await?;
+            self.connections.remove(table_uri);
+        }
         Ok(())
     }
 

@@ -48,6 +48,7 @@ pub struct ReplicationConnection {
     replication_state: Arc<ReplicationState>,
     source: PostgresSource,
     replication_started: bool,
+    slot_name: String,
 }
 
 impl ReplicationConnection {
@@ -84,7 +85,7 @@ impl ReplicationConnection {
 
         let postgres_source = PostgresSource::new(
             &uri,
-            Some(slot_name),
+            Some(slot_name.clone()),
             TableNamesFrom::Publication("moonlink_pub".to_string()),
         )
         .await
@@ -105,6 +106,7 @@ impl ReplicationConnection {
             replication_state: ReplicationState::new(),
             source: postgres_source,
             replication_started: false,
+            slot_name,
         })
     }
 
@@ -152,8 +154,35 @@ impl ReplicationConnection {
         Ok(())
     }
 
+    pub async fn drop_publication(&self) -> Result<()> {
+        self.postgres_client
+            .simple_query("DROP PUBLICATION IF EXISTS moonlink_pub;")
+            .await
+            .map_err(PostgresSourceError::from)?;
+        Ok(())
+    }
+
+    pub async fn drop_replication_slot(&self) -> Result<()> {
+        // First, terminate any active connections using this slot
+        let terminate_query = format!(
+            "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = '{}';",
+            self.slot_name
+        );
+        let _ = self.postgres_client.simple_query(&terminate_query).await;
+
+        // Then drop the replication slot
+        let drop_query = format!("SELECT pg_drop_replication_slot('{}');", self.slot_name);
+        let _ = self.postgres_client.simple_query(&drop_query).await;
+
+        Ok(())
+    }
+
     pub fn get_table_reader(&self, table_id: TableId) -> &ReadStateManager {
         self.table_readers.get(&table_id).unwrap()
+    }
+
+    pub fn table_readers_count(&self) -> usize {
+        self.table_readers.len()
     }
 
     pub fn get_iceberg_table_event_manager(
