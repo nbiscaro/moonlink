@@ -24,6 +24,7 @@ pub struct Sink {
     streaming_transactions_state: HashMap<u32, TransactionState>,
     transaction_state: TransactionState,
     replication_state: Arc<ReplicationState>,
+    last_lsn: u64,
 }
 
 impl Sink {
@@ -37,6 +38,7 @@ impl Sink {
                 touched_tables: HashSet::new(),
             },
             replication_state,
+            last_lsn: 0,
         }
     }
 }
@@ -190,6 +192,7 @@ impl Sink {
             CdcEvent::PrimaryKeepAlive(primary_keepalive_body) => {
                 self.replication_state
                     .mark(PgLsn::from(primary_keepalive_body.wal_end()));
+                self.last_lsn = primary_keepalive_body.wal_end();
             }
             CdcEvent::StreamStop(_stream_stop_body) => {}
             CdcEvent::StreamAbort(stream_abort_body) => {
@@ -208,6 +211,6 @@ impl Sink {
                 self.streaming_transactions_state.remove(&xact_id);
             }
         }
-        Ok(PgLsn::from(0))
+        Ok(PgLsn::from(self.last_lsn))
     }
 }
