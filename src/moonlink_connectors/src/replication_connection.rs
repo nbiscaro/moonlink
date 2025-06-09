@@ -1,9 +1,6 @@
-use crate::pg_replicate::conversions::cdc_event::CdcEventConversionError;
 use crate::pg_replicate::moonlink_sink::Sink;
 use crate::pg_replicate::postgres_source::CdcStream;
-use crate::pg_replicate::postgres_source::{
-    CdcStreamError, PostgresSource, PostgresSourceError, TableNamesFrom,
-};
+use crate::pg_replicate::postgres_source::{PostgresSource, PostgresSourceError, TableNamesFrom};
 use crate::pg_replicate::table_init::build_table_components;
 use crate::Result;
 use moonlink::{IcebergTableEventManager, ReadStateManager};
@@ -355,10 +352,6 @@ async fn run_event_loop(
                 };
 
                 match event_result {
-                    Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MissingSchema(_))) => {
-                        warn!("missing schema for replication event");
-                        continue;
-                    }
                     Err(e) => {
                         panic!("cdc stream error: {:?}", e);
                     }
