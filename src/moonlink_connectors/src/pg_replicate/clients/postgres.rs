@@ -165,6 +165,7 @@ impl ReplicationClient {
                 a.atttypid,
                 a.atttypmod,
                 a.attnotnull,
+                a.attndims,
                 coalesce(i.indisprimary, false) as primary
             from pg_attribute a
             left join pg_index i
@@ -231,6 +232,23 @@ impl ReplicationClient {
                     ))?
                     .parse()
                     .map_err(|_| ReplicationClientError::TypeModifierColumnNotI32)?;
+
+                let attndims: i32 = row
+                    .try_get("attndims")?
+                    .ok_or(ReplicationClientError::MissingColumn(
+                        "attndims".to_string(),
+                        "pg_attribute".to_string(),
+                    ))?
+                    .parse()
+                    .map_err(|_| ReplicationClientError::TypeModifierColumnNotI32)?;
+
+                if matches!(typ.kind(), Kind::Array(_)) && attndims > 1 {
+                    return Err(ReplicationClientError::UnsupportedType(
+                        name.clone(),
+                        type_oid,
+                        table_name.to_string(),
+                    ));
+                }
 
                 let nullable =
                     row.try_get("attnotnull")?
