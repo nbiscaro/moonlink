@@ -210,13 +210,11 @@ impl ReplicationConnection {
             .await
             .expect("failed to commit transaction");
 
-        // TODO: start from the last lsn in replication state for recovery.
         // TODO: track tables copied in replication state and recover these before starting the event loop.
-        let mut last_lsn: u64 = 0;
-        last_lsn += 1;
+        let last_lsn = self.source.confirmed_flush_lsn();
         let stream = self
             .source
-            .get_cdc_stream(last_lsn.into())
+            .get_cdc_stream(last_lsn)
             .await
             .expect("failed to get cdc stream");
 
