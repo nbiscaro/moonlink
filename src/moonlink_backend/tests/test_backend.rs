@@ -123,8 +123,8 @@ mod tests {
             .unwrap();
 
         let old = backend.scan_table(&"test", None).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await; // wait for replication
-        let new = backend.scan_table(&"test", None).await.unwrap();
+        let lsn = current_wal_lsn(client).await;
+        let new = backend.scan_table(&"test", Some(lsn)).await.unwrap();
         assert_ne!(old.data, new.data);
 
         recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
@@ -180,9 +180,9 @@ mod tests {
             .simple_query("INSERT INTO scan_test VALUES (1,'a'),(2,'b');")
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let lsn = current_wal_lsn(&client).await;
 
-        let ids = ids_from_state(&backend.scan_table(&"scan_test", None).await.unwrap());
+        let ids = ids_from_state(&backend.scan_table(&"scan_test", Some(lsn)).await.unwrap());
         assert_eq!(ids, HashSet::from([1, 2]));
 
         // Add one more row.
@@ -190,9 +190,9 @@ mod tests {
             .simple_query("INSERT INTO scan_test VALUES (3,'c');")
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let lsn = current_wal_lsn(&client).await;
 
-        let ids = ids_from_state(&backend.scan_table(&"scan_test", None).await.unwrap());
+        let ids = ids_from_state(&backend.scan_table(&"scan_test", Some(lsn)).await.unwrap());
         assert_eq!(ids, HashSet::from([1, 2, 3]));
 
         backend.drop_table("scan_test").await.unwrap();
@@ -211,7 +211,6 @@ mod tests {
             .await
             .unwrap();
         let lsn1 = current_wal_lsn(&client).await;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         let ids = ids_from_state(&backend.scan_table(&"lsn_test", Some(lsn1)).await.unwrap());
         assert_eq!(ids, HashSet::from([1]));
@@ -221,7 +220,6 @@ mod tests {
             .await
             .unwrap();
         let lsn2 = current_wal_lsn(&client).await;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         let ids = ids_from_state(&backend.scan_table(&"lsn_test", Some(lsn2)).await.unwrap());
         assert_eq!(ids, HashSet::from([1, 2]));
@@ -241,7 +239,6 @@ mod tests {
             .await
             .unwrap();
         let lsn = current_wal_lsn(&client).await;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         backend
             .create_iceberg_snapshot(&"snapshot_test", lsn)
