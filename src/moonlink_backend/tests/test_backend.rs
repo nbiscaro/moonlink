@@ -96,7 +96,7 @@ mod tests {
         (temp_dir, backend, client)
     }
 
-    /// Reusable helper for the “create table / insert rows / detect change”
+    /// Reusable helper for the "create table / insert rows / detect change"
     /// scenario used in two places.
     async fn smoke_create_and_insert(
         backend: &MoonlinkBackend<&'static str>,
@@ -141,7 +141,7 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         assert!(file.exists());
 
-        // idempotent “wipe” of an existing dir
+        // idempotent "wipe" of an existing dir
         recreate_directory(tmp.path().to_str().unwrap()).unwrap();
         assert!(!file.exists());
 
@@ -257,6 +257,70 @@ mod tests {
         assert!(meta_dir.exists() && meta_dir.read_dir().unwrap().next().is_some());
 
         backend.drop_table("snapshot_test").await.unwrap();
+        recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
+    }
+
+    /// Test that replication connections are properly cleaned up and can be recreated.
+    /// This validates that dropping the last table from a connection properly cleans up
+    /// the replication slot, allowing new connections to be established.
+    #[tokio::test]
+    #[serial]
+    async fn test_replication_connection_cleanup() {
+        let temp_dir = TempDir::new().unwrap();
+        let uri = "postgresql://postgres:postgres@postgres:5432/postgres";
+        let backend =
+            MoonlinkBackend::<&'static str>::new(temp_dir.path().to_str().unwrap().into());
+
+        let (client, conn) = connect(uri, NoTls).await.unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        // Create the test table
+        client
+            .simple_query(
+                "DROP TABLE IF EXISTS repl_test;
+                 CREATE TABLE repl_test (id BIGINT PRIMARY KEY, name TEXT);",
+            )
+            .await
+            .unwrap();
+
+        // First cycle: add table, insert data, verify it works
+        backend
+            .create_table("repl_test", "public.repl_test", uri)
+            .await
+            .unwrap();
+
+        client
+            .simple_query("INSERT INTO repl_test VALUES (1,'first');")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let ids = ids_from_state(&backend.scan_table(&"repl_test", None).await.unwrap());
+        assert_eq!(ids, HashSet::from([1]));
+
+        // Drop the table (this should clean up the replication connection)
+        backend.drop_table("repl_test").await.unwrap();
+
+        // Second cycle: add table again, insert different data, verify it works
+        backend
+            .create_table("repl_test", "public.repl_test", uri)
+            .await
+            .unwrap();
+
+        client
+            .simple_query("INSERT INTO repl_test VALUES (2,'second');")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let ids = ids_from_state(&backend.scan_table(&"repl_test", None).await.unwrap());
+        // Should only see the new row (2), not the old one (1)
+        assert_eq!(ids, HashSet::from([2]));
+
+        // Clean up
+        backend.drop_table("repl_test").await.unwrap();
         recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
     }
 }
