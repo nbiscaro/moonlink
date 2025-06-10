@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
 use tokio_postgres::types::PgLsn;
+use tracing::{debug, warn};
 
 #[derive(Default)]
 struct TransactionState {
@@ -61,47 +62,58 @@ impl Sink {
     pub async fn process_cdc_event(&mut self, event: CdcEvent) -> Result<PgLsn, Infallible> {
         match event {
             CdcEvent::Begin(begin_body) => {
+                debug!(final_lsn = begin_body.final_lsn(), "begin transaction");
                 self.transaction_state.final_lsn = begin_body.final_lsn();
             }
             CdcEvent::StreamStart(_stream_start_body) => {}
             CdcEvent::Commit(commit_body) => {
+                debug!(end_lsn = commit_body.end_lsn(), "commit transaction");
                 for table_id in &self.transaction_state.touched_tables {
                     let event_sender = self.event_senders.get(table_id).cloned();
                     if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id).cloned() {
-                        commit_lsn_tx
-                            .send(commit_body.end_lsn())
-                            .expect("failed to send commit lsn");
+                        if let Err(e) = commit_lsn_tx.send(commit_body.end_lsn()) {
+                            warn!(error = ?e, "failed to send commit lsn");
+                        }
                     }
                     if let Some(event_sender) = event_sender {
-                        event_sender
+                        if let Err(e) = event_sender
                             .send(TableEvent::Commit {
                                 lsn: commit_body.end_lsn(),
                                 xact_id: None,
                             })
                             .await
-                            .unwrap();
+                        {
+                            warn!(error = ?e, "failed to send commit event");
+                        }
                     }
                 }
                 self.transaction_state.touched_tables.clear();
             }
             CdcEvent::StreamCommit(stream_commit_body) => {
                 let xact_id = stream_commit_body.xid();
+                debug!(
+                    xact_id,
+                    end_lsn = stream_commit_body.end_lsn(),
+                    "stream commit"
+                );
                 if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
                     for table_id in &tables_in_txn.touched_tables {
                         let event_sender = self.event_senders.get(table_id).cloned();
                         if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id).cloned() {
-                            commit_lsn_tx
-                                .send(stream_commit_body.end_lsn())
-                                .expect("failed to send commit lsn");
+                            if let Err(e) = commit_lsn_tx.send(stream_commit_body.end_lsn()) {
+                                warn!(error = ?e, "failed to send stream commit lsn");
+                            }
                         }
                         if let Some(event_sender) = event_sender {
-                            event_sender
+                            if let Err(e) = event_sender
                                 .send(TableEvent::Commit {
                                     lsn: stream_commit_body.end_lsn(),
                                     xact_id: Some(xact_id),
                                 })
                                 .await
-                                .unwrap();
+                            {
+                                warn!(error = ?e, "failed to send stream commit event");
+                            }
                         }
                     }
                     self.streaming_transactions_state.remove(&xact_id);
@@ -110,13 +122,15 @@ impl Sink {
             CdcEvent::Insert((table_id, table_row, xact_id)) => {
                 let event_sender = self.event_senders.get(&table_id).cloned();
                 if let Some(event_sender) = event_sender {
-                    event_sender
+                    if let Err(e) = event_sender
                         .send(TableEvent::Append {
                             row: PostgresTableRow(table_row).into(),
                             xact_id,
                         })
                         .await
-                        .unwrap();
+                    {
+                        warn!(error = ?e, "failed to send append event");
+                    }
                     if let Some(xid) = xact_id {
                         self.streaming_transactions_state
                             .entry(xid)
@@ -146,21 +160,25 @@ impl Sink {
 
                 let event_sender = self.event_senders.get(&table_id).cloned();
                 if let Some(event_sender) = event_sender {
-                    event_sender
+                    if let Err(e) = event_sender
                         .send(TableEvent::Delete {
                             row: PostgresTableRow(old_table_row.unwrap()).into(),
                             lsn: final_lsn,
                             xact_id,
                         })
                         .await
-                        .unwrap();
-                    event_sender
+                    {
+                        warn!(error = ?e, "failed to send delete event");
+                    }
+                    if let Err(e) = event_sender
                         .send(TableEvent::Append {
                             row: PostgresTableRow(new_table_row).into(),
                             xact_id,
                         })
                         .await
-                        .unwrap();
+                    {
+                        warn!(error = ?e, "failed to send append event");
+                    }
                 }
             }
             CdcEvent::Delete((table_id, table_row, xact_id)) => {
@@ -181,18 +199,20 @@ impl Sink {
 
                 let event_sender = self.event_senders.get(&table_id).cloned();
                 if let Some(event_sender) = event_sender {
-                    event_sender
+                    if let Err(e) = event_sender
                         .send(TableEvent::Delete {
                             row: PostgresTableRow(table_row).into(),
                             lsn: final_lsn,
                             xact_id,
                         })
                         .await
-                        .unwrap();
+                    {
+                        warn!(error = ?e, "failed to send delete event");
+                    }
                 }
             }
-            CdcEvent::Relation(relation_body) => println!("Relation {relation_body:?}"),
-            CdcEvent::Type(type_body) => println!("Type {type_body:?}"),
+            CdcEvent::Relation(relation_body) => debug!("Relation {relation_body:?}"),
+            CdcEvent::Type(type_body) => debug!("Type {type_body:?}"),
             CdcEvent::PrimaryKeepAlive(primary_keepalive_body) => {
                 self.replication_state
                     .mark(PgLsn::from(primary_keepalive_body.wal_end()));
@@ -201,14 +221,16 @@ impl Sink {
             CdcEvent::StreamStop(_stream_stop_body) => {}
             CdcEvent::StreamAbort(stream_abort_body) => {
                 let xact_id = stream_abort_body.xid();
+                warn!(xact_id, "stream transaction aborted");
                 if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
                     for table_id in &tables_in_txn.touched_tables {
                         let event_sender = self.event_senders.get(table_id).cloned();
                         if let Some(event_sender) = event_sender {
-                            event_sender
-                                .send(TableEvent::StreamAbort { xact_id })
-                                .await
-                                .unwrap();
+                            if let Err(e) =
+                                event_sender.send(TableEvent::StreamAbort { xact_id }).await
+                            {
+                                warn!(error = ?e, "failed to send stream abort event");
+                            }
                         }
                     }
                 }
