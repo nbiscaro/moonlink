@@ -83,6 +83,9 @@ impl Sink {
                     }
                 }
                 self.transaction_state.touched_tables.clear();
+                self.replication_state
+                    .mark(PgLsn::from(commit_body.end_lsn()));
+                self.last_lsn = commit_body.end_lsn();
             }
             CdcEvent::StreamCommit(stream_commit_body) => {
                 let xact_id = stream_commit_body.xid();
@@ -106,6 +109,9 @@ impl Sink {
                     }
                     self.streaming_transactions_state.remove(&xact_id);
                 }
+                self.replication_state
+                    .mark(PgLsn::from(stream_commit_body.end_lsn()));
+                self.last_lsn = stream_commit_body.end_lsn();
             }
             CdcEvent::Insert((table_id, table_row, xact_id)) => {
                 let event_sender = self.event_senders.get(&table_id).cloned();
