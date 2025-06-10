@@ -4,6 +4,7 @@ use crate::{PostgresSourceError, ReplicationConnection};
 use moonlink::{IcebergTableEventManager, ReadStateManager};
 use std::collections::HashMap;
 use std::hash::Hash;
+use tracing::{debug, info};
 
 /// Manage replication sources keyed by their connection URI.
 ///
@@ -42,7 +43,9 @@ impl<T: Eq + Hash> ReplicationManager<T> {
         external_table_id: T,
         table_name: &str,
     ) -> Result<()> {
+        info!(%uri, table_name, "adding table through manager");
         if !self.connections.contains_key(uri) {
+            debug!(%uri, "creating replication connection");
             // Lazily create the directory that will hold all tables.
             // This will not overwrite any existing directory.
             tokio::fs::create_dir_all(&self.table_base_path)
@@ -70,6 +73,8 @@ impl<T: Eq + Hash> ReplicationManager<T> {
             replication_connection.start_replication().await?;
         }
 
+        info!(table_id, "table added through manager");
+
         Ok(())
     }
 
@@ -77,6 +82,7 @@ impl<T: Eq + Hash> ReplicationManager<T> {
     /// Precondition: the table has been registered, otherwise panics.
     pub async fn drop_table(&mut self, external_table_id: T) -> Result<()> {
         let (table_uri, table_id) = &self.table_info.get(&external_table_id).unwrap();
+        info!(table_id, %table_uri, "dropping table through manager");
         let repl_conn = self.connections.get_mut(table_uri).unwrap();
         repl_conn.drop_table(*table_id).await?;
         if repl_conn.table_readers_count() == 0 {
@@ -84,6 +90,8 @@ impl<T: Eq + Hash> ReplicationManager<T> {
             repl_conn.drop_replication_slot().await?;
             self.connections.remove(table_uri);
         }
+
+        info!(table_id, "table dropped through manager");
         Ok(())
     }
 

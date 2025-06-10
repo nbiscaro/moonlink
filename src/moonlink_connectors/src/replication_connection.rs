@@ -21,7 +21,7 @@ use std::path::Path;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_postgres::{connect, Client, Config, NoTls};
-use tracing::warn;
+use tracing::{debug, error, info, warn};
 
 pub enum Command {
     AddTable {
@@ -57,6 +57,8 @@ impl ReplicationConnection {
         table_base_path: String,
         table_temp_files_directory: String,
     ) -> Result<Self> {
+        info!(%uri, "initializing replication connection");
+
         let (postgres_client, connection) = connect(&uri, NoTls)
             .await
             .map_err(PostgresSourceError::from)?;
@@ -92,6 +94,8 @@ impl ReplicationConnection {
         .unwrap();
 
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
+
+        info!("replication connection ready");
 
         Ok(Self {
             uri,
@@ -205,24 +209,28 @@ impl ReplicationConnection {
         sink: Sink,
         cmd_rx: mpsc::Receiver<Command>,
     ) -> JoinHandle<Result<()>> {
-        self.source
-            .commit_transaction()
-            .await
-            .expect("failed to commit transaction");
+        debug!("spawning replication task");
+        if let Err(e) = self.source.commit_transaction().await {
+            error!(error = ?e, "failed to commit transaction");
+            return tokio::spawn(async { Err(e.into()) });
+        }
 
         // TODO: track tables copied in replication state and recover these before starting the event loop.
         let last_lsn = self.source.confirmed_flush_lsn();
-        let stream = self
-            .source
-            .get_cdc_stream(last_lsn)
-            .await
-            .expect("failed to get cdc stream");
+        let stream = match self.source.get_cdc_stream(last_lsn).await {
+            Ok(s) => s,
+            Err(e) => {
+                error!(error = ?e, "failed to get cdc stream");
+                return tokio::spawn(async { Err(e.into()) });
+            }
+        };
 
         tokio::spawn(async move { run_event_loop(stream, sink, cmd_rx).await })
     }
 
     async fn add_table_to_replication(&mut self, schema: &TableSchema) -> Result<()> {
         let table_id = schema.table_id;
+        debug!(table_id, "adding table to replication");
         let resources = build_table_components(
             schema,
             Path::new(&self.table_base_path),
@@ -235,7 +243,8 @@ impl ReplicationConnection {
             .insert(table_id, resources.read_state_manager);
         self.iceberg_table_event_managers
             .insert(table_id, resources.iceberg_table_event_manager);
-        self.cmd_tx
+        if let Err(e) = self
+            .cmd_tx
             .send(Command::AddTable {
                 table_id,
                 schema: schema.clone(),
@@ -243,22 +252,28 @@ impl ReplicationConnection {
                 commit_lsn_tx: resources.commit_lsn_tx,
             })
             .await
-            .unwrap();
+        {
+            error!(error = ?e, "failed to enqueue AddTable command");
+        }
+
+        debug!(table_id, "table added to replication");
 
         Ok(())
     }
 
     async fn remove_table_from_replication(&mut self, table_id: u32) -> Result<()> {
+        debug!(table_id, "removing table from replication");
         self.drop_iceberg_table(table_id).await?;
 
         self.table_readers.remove_entry(&table_id).unwrap();
         self.iceberg_table_event_managers
             .remove_entry(&table_id)
             .unwrap();
-        self.cmd_tx
-            .send(Command::DropTable { table_id })
-            .await
-            .unwrap();
+        if let Err(e) = self.cmd_tx.send(Command::DropTable { table_id }).await {
+            error!(error = ?e, "failed to enqueue DropTable command");
+        }
+
+        debug!(table_id, "table removed from replication");
 
         Ok(())
     }
@@ -274,6 +289,7 @@ impl ReplicationConnection {
     }
 
     pub async fn start_replication(&mut self) -> Result<()> {
+        info!("starting replication");
         let table_schemas = self.source.get_table_schemas().await;
 
         let (tx, rx) = mpsc::channel(8);
@@ -290,10 +306,13 @@ impl ReplicationConnection {
 
         self.replication_started = true;
 
+        info!("replication started");
+
         Ok(())
     }
 
     pub async fn add_table(&mut self, table_name: &str) -> Result<TableId> {
+        info!(table_name, "adding table");
         // TODO: We should not naively alter the replica identity of a table. We should only do this if we are sure that the table does not already have a FULL replica identity. [https://github.com/Mooncake-Labs/moonlink/issues/104]
         self.alter_table_replica_identity(table_name).await?;
         let table_schema = self.source.fetch_table_schema(table_name, None).await?;
@@ -302,16 +321,21 @@ impl ReplicationConnection {
 
         self.add_table_to_publication(table_name).await?;
 
+        info!(table_id = table_schema.table_id, "table added");
+
         Ok(table_schema.table_id)
     }
 
     /// Remove the given table from connection.
     pub async fn drop_table(&mut self, table_id: u32) -> Result<()> {
+        info!(table_id, "dropping table");
         let table_name = self.source.get_table_name_from_id(table_id);
         // Remove table from publication as the first step, to prevent further events.
         self.remove_table_from_publication(&table_name).await?;
         self.source.remove_table_schema(table_id);
         self.remove_table_from_replication(table_id).await?;
+
+        info!(table_id, "table dropped");
         Ok(())
     }
 
@@ -327,17 +351,21 @@ async fn run_event_loop(
 ) -> Result<()> {
     pin!(stream);
 
+    debug!("replication event loop started");
+
     let mut status_interval = tokio::time::interval(Duration::from_secs(10));
     let mut last_lsn = PgLsn::from(0);
 
     loop {
         tokio::select! {
                         _ = status_interval.tick() => {
-                            stream
+                            if let Err(e) = stream
                                 .as_mut()
                                 .send_status_update(last_lsn)
                                 .await
-                                .expect("failed to send status update");
+                            {
+                                error!(error = ?e, "failed to send status update");
+                            }
                         },
                         Some(cmd) = cmd_rx.recv() => match cmd {
                             Command::AddTable { table_id, schema, event_sender, commit_lsn_tx } => {
@@ -351,7 +379,8 @@ async fn run_event_loop(
                         },
                         event = StreamExt::next(&mut stream) => {
                 let Some(event_result) = event else {
-                    panic!("replication stream ended unexpectedly");
+                    error!("replication stream ended unexpectedly");
+                    break;
                 };
 
                 match event_result {
@@ -360,7 +389,8 @@ async fn run_event_loop(
                         continue;
                     }
                     Err(e) => {
-                        panic!("cdc stream error: {:?}", e);
+                        error!(error = ?e, "cdc stream error");
+                        break;
                     }
                     Ok(event) => {
                         last_lsn = sink.process_cdc_event(event).await.unwrap();
@@ -369,4 +399,7 @@ async fn run_event_loop(
             }
         }
     }
+
+    info!("replication event loop stopped");
+    Ok(())
 }
