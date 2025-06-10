@@ -1,4 +1,5 @@
 mod error;
+mod logging;
 
 pub use error::{Error, Result};
 pub use moonlink::ReadState;
@@ -44,6 +45,8 @@ impl<T: Eq + Hash + Clone> Default for MoonlinkBackend<T> {
 
 impl<T: Eq + Hash + Clone> MoonlinkBackend<T> {
     pub fn new(base_path: String) -> Self {
+        logging::init_logging();
+
         recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
         Self {
             replication_manager: RwLock::new(ReplicationManager::new(
