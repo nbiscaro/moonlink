@@ -10,7 +10,7 @@ use pin_project_lite::pin_project;
 use postgres_replication::LogicalReplicationStream;
 use thiserror::Error;
 use tokio_postgres::{types::PgLsn, CopyOutStream};
-use tracing::info;
+use tracing::{debug, error, info};
 
 use crate::pg_replicate::{
     clients::postgres::{ReplicationClient, ReplicationClientError},
@@ -139,6 +139,7 @@ impl PostgresSource {
         // Add the table schema to the source so that we can use it to convert cdc events.
         self.table_schemas
             .insert(table_schema.table_id, table_schema.clone());
+        debug!(table_name, "fetched table schema");
         Ok(table_schema)
     }
 
@@ -239,10 +240,14 @@ impl Stream for TableCopyStream {
                 Ok(row) => Poll::Ready(Some(Ok(row))),
                 Err(e) => {
                     let e = TableCopyStreamError::ConversionError(e);
+                    error!(error = ?e, "failed to convert table row");
                     Poll::Ready(Some(Err(e)))
                 }
             },
-            Some(Err(e)) => Poll::Ready(Some(Err(e.into()))),
+            Some(Err(e)) => {
+                error!(error = ?e, "table copy stream error");
+                Poll::Ready(Some(Err(e.into())))
+            }
             None => Poll::Ready(None),
         }
     }

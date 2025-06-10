@@ -12,6 +12,7 @@ use num_traits::cast::ToPrimitive;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_postgres::types::{Kind, Type};
+use tracing::warn;
 
 fn numeric_precision_scale(modifier: i32) -> Option<(u8, i8)> {
     const VARHDRSZ: i32 = 4;
@@ -371,9 +372,7 @@ impl From<PostgresTableRow> for MoonlinkRow {
                                 values.push(RowValue::Decimal(scaled_integer));
                             } else {
                                 values.push(RowValue::Null); // handle overflow safely
-                                eprintln!(
-                                    "Decimal value too large to fit in i128 — storing as NULL"
-                                );
+                                warn!("Decimal value too large to fit in i128; storing as NULL");
                             }
                         }
                         _ => {
