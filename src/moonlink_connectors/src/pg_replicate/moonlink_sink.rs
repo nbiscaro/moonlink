@@ -65,7 +65,9 @@ impl Sink {
                 debug!(final_lsn = begin_body.final_lsn(), "begin transaction");
                 self.transaction_state.final_lsn = begin_body.final_lsn();
             }
-            CdcEvent::StreamStart(_stream_start_body) => {}
+            CdcEvent::StreamStart(stream_start_body) => {
+                debug!(stream_id = stream_start_body.xid(), "stream start");
+            }
             CdcEvent::Commit(commit_body) => {
                 debug!(end_lsn = commit_body.end_lsn(), "commit transaction");
                 for table_id in &self.transaction_state.touched_tables {
@@ -211,14 +213,33 @@ impl Sink {
                     }
                 }
             }
-            CdcEvent::Relation(relation_body) => debug!("Relation {relation_body:?}"),
-            CdcEvent::Type(type_body) => debug!("Type {type_body:?}"),
+            CdcEvent::Relation(relation_body) => {
+                debug!(
+                    relation_id = relation_body.rel_id(),
+                    relation_name = relation_body.name().unwrap_or("unknown"),
+                    "Relation"
+                );
+            }
+            CdcEvent::Type(type_body) => {
+                debug!(
+                    type_id = type_body.id(),
+                    type_xid = type_body.xid(),
+                    type_name = type_body.name().unwrap_or("unknown"),
+                    "Type"
+                );
+            }
             CdcEvent::PrimaryKeepAlive(primary_keepalive_body) => {
+                debug!(
+                    wal_end = primary_keepalive_body.wal_end(),
+                    "Primary keep alive"
+                );
                 self.replication_state
                     .mark(PgLsn::from(primary_keepalive_body.wal_end()));
                 self.last_lsn = primary_keepalive_body.wal_end();
             }
-            CdcEvent::StreamStop(_stream_stop_body) => {}
+            CdcEvent::StreamStop(_stream_stop_body) => {
+                debug!("Stream stop");
+            }
             CdcEvent::StreamAbort(stream_abort_body) => {
                 let xact_id = stream_abort_body.xid();
                 warn!(xact_id, "stream transaction aborted");
