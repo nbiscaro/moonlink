@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
+use tracing::{error, info, warn};
 
 /// Event types that can be processed by the TableHandler
 #[derive(Debug)]
@@ -181,7 +182,7 @@ impl TableHandler {
                                     let res = table.append_in_stream_batch(row, xact_id);
                                     if table.should_transaction_flush(xact_id) {
                                         if let Err(e) = table.flush_transaction_stream(xact_id).await {
-                                            println!("Flush failed in Append: {}", e);
+                                            warn!(error = %e, "flush failed in append");
                                         }
                                     }
                                     res
@@ -190,7 +191,7 @@ impl TableHandler {
                             };
 
                             if let Err(e) = result {
-                                println!("Failed to append row: {}", e);
+                                warn!(error = %e, "failed to append row");
                             }
                         }
                         TableEvent::Delete { row, lsn, xact_id } => {
@@ -211,14 +212,14 @@ impl TableHandler {
                             match xact_id {
                                 Some(xact_id) => {
                                     if let Err(e) = table.commit_transaction_stream(xact_id, lsn).await {
-                                        println!("Stream commit flush failed: {}", e);
+                                        warn!(error = %e, "stream commit flush failed");
                                     }
                                 }
                                 None => {
                                     table.commit(lsn);
                                     if table.should_flush() || force_snapshot {
                                         if let Err(e) = table.flush(lsn).await {
-                                            println!("Flush failed in Commit: {}", e);
+                                            warn!(error = %e, "flush failed in commit");
                                         }
                                     }
                                 }
@@ -240,16 +241,16 @@ impl TableHandler {
                         }
                         TableEvent::Flush { lsn } => {
                             if let Err(e) = table.flush(lsn).await {
-                                println!("Explicit Flush failed: {}", e);
+                                warn!(error = %e, "explicit flush failed");
                             }
                         }
                         TableEvent::StreamFlush { xact_id } => {
                             if let Err(e) = table.flush_transaction_stream(xact_id).await {
-                                println!("Stream flush failed: {}", e);
+                                warn!(error = %e, "stream flush failed");
                             }
                         }
                         TableEvent::_Shutdown => {
-                            println!("Shutting down table handler");
+                            info!("shutting down table handler");
                             break;
                         }
                         TableEvent::ForceSnapshot { lsn, tx } => {
@@ -366,7 +367,7 @@ impl TableHandler {
                                     table.set_data_compaction_res(data_compaction_res)
                                 }
                                 Err(err) => {
-                                    println!("Failed to perform compaction: {:?}", err);
+                                    error!(error = ?err, "failed to perform compaction");
                                 }
                             }
                             data_compaction_ongoing = false;
@@ -409,7 +410,7 @@ impl TableHandler {
                 }
                 // If all senders have been dropped, exit the loop
                 else => {
-                    println!("All event senders have been dropped, shutting down table handler");
+                    info!("all event senders dropped, shutting down table handler");
                     break;
                 }
             }
