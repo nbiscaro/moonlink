@@ -1,7 +1,10 @@
 pub fn init_logging() {
-    use tracing_subscriber::EnvFilter;
+    use std::io;
+    use tracing_subscriber::{fmt, EnvFilter};
 
-    let _ = tracing_subscriber::fmt()
+    let _ = fmt()
+        .with_writer(io::stderr)
         .with_env_filter(EnvFilter::from_default_env())
-        .try_init(); // prevents double-init panics
+        .with_ansi(false)
+        .try_init();
 }
