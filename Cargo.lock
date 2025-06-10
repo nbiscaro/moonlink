@@ -2146,6 +2146,7 @@ dependencies = [
  "tokio",
  "tokio-bitstream-io",
  "tokio-retry2",
+ "tracing",
  "typed-builder 0.20.1",
  "url",
  "uuid",
