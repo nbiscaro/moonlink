@@ -7,6 +7,7 @@ use super::table_metadata::TableMetadata;
 use crate::storage::PuffinDeletionBlobAtRead;
 
 use bincode::config;
+use tracing::warn;
 
 const BINCODE_CONFIG: config::Configuration = config::standard();
 
@@ -26,7 +27,7 @@ impl Drop for ReadState {
         tokio::spawn(async move {
             for file in associated_files.into_iter() {
                 if let Err(e) = tokio::fs::remove_file(&file).await {
-                    println!("Failed to delete file {} because {:?}", file, e);
+                    warn!(%file, error = ?e, "failed to delete associated file");
                 }
             }
         });
