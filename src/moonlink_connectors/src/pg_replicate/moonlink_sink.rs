@@ -229,10 +229,6 @@ impl Sink {
                 );
             }
             CdcEvent::PrimaryKeepAlive(primary_keepalive_body) => {
-                debug!(
-                    wal_end = primary_keepalive_body.wal_end(),
-                    "Primary keep alive"
-                );
                 self.replication_state
                     .mark(PgLsn::from(primary_keepalive_body.wal_end()));
                 self.last_lsn = primary_keepalive_body.wal_end();

@@ -286,6 +286,7 @@ impl CdcStream {
         self: Pin<&mut Self>,
         lsn: PgLsn,
     ) -> Result<(), StatusUpdateError> {
+        debug!(lsn = ?lsn, "sending status update");
         let this = self.project();
         let ts = this.postgres_epoch.elapsed()?.as_micros() as i64;
         this.stream
