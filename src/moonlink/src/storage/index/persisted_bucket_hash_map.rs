@@ -761,6 +761,7 @@ mod tests {
     use std::vec;
 
     use super::*;
+    use tracing::debug;
 
     use crate::storage::storage_utils::{create_data_file, FileId};
 
@@ -803,7 +804,7 @@ mod tests {
         for block in index.index_blocks.iter() {
             let mut index_block_iter = block.create_iterator(&index, &file_id_remap).await;
             while let Some((hash, seg_idx, row_idx)) = index_block_iter.next().await {
-                println!("{} {} {}", hash, seg_idx, row_idx);
+                debug!(?hash, seg_idx, row_idx, "index entry");
                 hash_entry_num += 1;
             }
         }
