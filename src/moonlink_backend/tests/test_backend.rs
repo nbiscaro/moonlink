@@ -13,6 +13,8 @@ mod tests {
         recreate_directory, MoonlinkBackend, ReadState, DEFAULT_MOONLINK_TEMP_FILE_PATH,
     };
 
+    const URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
+
     // ───────────────────── Helper functions & fixtures ─────────────────────
 
     /// Return the current WAL LSN as a simple `u64`.
@@ -57,7 +59,7 @@ mod tests {
         table_name: &'static str,
     ) -> (TempDir, MoonlinkBackend<&'static str>, Client) {
         let temp_dir = TempDir::new().unwrap();
-        let uri = "postgresql://postgres:postgres@postgres:5432/postgres";
+        let uri = URI;
         let backend =
             MoonlinkBackend::<&'static str>::new(temp_dir.path().to_str().unwrap().into());
 
@@ -156,7 +158,7 @@ mod tests {
     #[serial]
     async fn test_moonlink_service() {
         let temp_dir = TempDir::new().unwrap();
-        let uri = "postgresql://postgres:postgres@postgres:5432/postgres";
+        let uri = URI;
         let backend =
             MoonlinkBackend::<&'static str>::new(temp_dir.path().to_str().unwrap().into());
 
@@ -168,6 +170,8 @@ mod tests {
         smoke_create_and_insert(&backend, &client, uri).await;
         backend.drop_table("test").await.unwrap();
         smoke_create_and_insert(&backend, &client, uri).await;
+        backend.drop_table("test").await.unwrap();
+        backend.shutdown_connection(URI).await.unwrap();
     }
 
     /// End-to-end: inserts should appear in `scan_table`.
@@ -196,6 +200,7 @@ mod tests {
         assert_eq!(ids, HashSet::from([1, 2, 3]));
 
         backend.drop_table("scan_test").await.unwrap();
+        backend.shutdown_connection(URI).await.unwrap();
         recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
         drop(tmp);
     }
@@ -225,6 +230,7 @@ mod tests {
         assert_eq!(ids, HashSet::from([1, 2]));
 
         backend.drop_table("lsn_test").await.unwrap();
+        backend.shutdown_connection(URI).await.unwrap();
         recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
     }
 
@@ -258,6 +264,7 @@ mod tests {
         assert!(meta_dir.read_dir().unwrap().next().is_some());
 
         backend.drop_table("snapshot_test").await.unwrap();
+        backend.shutdown_connection(URI).await.unwrap();
         recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
     }
 
@@ -268,7 +275,7 @@ mod tests {
     #[serial]
     async fn test_replication_connection_cleanup() {
         let temp_dir = TempDir::new().unwrap();
-        let uri = "postgresql://postgres:postgres@postgres:5432/postgres";
+        let uri = URI;
         let backend =
             MoonlinkBackend::<&'static str>::new(temp_dir.path().to_str().unwrap().into());
 
@@ -322,6 +329,7 @@ mod tests {
 
         // Clean up
         backend.drop_table("repl_test").await.unwrap();
+        backend.shutdown_connection(URI).await.unwrap();
         recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
     }
 }
