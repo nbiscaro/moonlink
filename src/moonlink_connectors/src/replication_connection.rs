@@ -33,6 +33,7 @@ pub enum Command {
     DropTable {
         table_id: TableId,
     },
+    Shutdown,
 }
 
 pub struct ReplicationConnection {
@@ -343,6 +344,25 @@ impl ReplicationConnection {
     pub fn check_table_belongs_to_source(&self, uri: &str) -> bool {
         self.uri == uri
     }
+
+    pub async fn shutdown(&mut self) -> Result<()> {
+        info!("shutting down replication connection");
+        if self.replication_started {
+            if let Err(e) = self.cmd_tx.send(Command::Shutdown).await {
+                warn!(error = ?e, "failed to send shutdown command");
+            }
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.await;
+            }
+            self.replication_started = false;
+        }
+
+        self.drop_publication().await?;
+        self.drop_replication_slot().await?;
+
+        info!("replication connection shut down");
+        Ok(())
+    }
 }
 
 async fn run_event_loop(
@@ -376,6 +396,10 @@ async fn run_event_loop(
                             Command::DropTable { table_id } => {
                                 sink.drop_table(table_id);
                                 stream.as_mut().remove_table_schema(table_id);
+                            }
+                            Command::Shutdown => {
+                                info!("received shutdown command");
+                                break;
                             }
                         },
                         event = StreamExt::next(&mut stream) => {
