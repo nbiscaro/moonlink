@@ -76,6 +76,13 @@ impl<T: Eq + Hash + Clone> MoonlinkBackend<T> {
         Ok(read_state)
     }
 
+    /// Gracefully shutdown a replication connection identified by its URI.
+    pub async fn shutdown_connection(&self, uri: &str) -> Result<()> {
+        let mut manager = self.replication_manager.write().await;
+        manager.shutdown_connection(uri).await?;
+        Ok(())
+    }
+
     /// Create an iceberg snapshot with the given LSN, return when the a snapshot is successfully created.
     pub async fn create_iceberg_snapshot(&self, table_id: &T, lsn: u64) -> Result<()> {
         #[allow(unused_assignments)]
