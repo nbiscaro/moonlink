@@ -81,14 +81,12 @@ impl<T: Eq + Hash> ReplicationManager<T> {
     /// Drop table specified by the given table id.
     /// Precondition: the table has been registered, otherwise panics.
     pub async fn drop_table(&mut self, external_table_id: T) -> Result<()> {
-        let (table_uri, table_id) = &self.table_info.get(&external_table_id).unwrap();
+        let (table_uri, table_id) = self.table_info.get(&external_table_id).unwrap().clone();
         info!(table_id, %table_uri, "dropping table through manager");
-        let repl_conn = self.connections.get_mut(table_uri).unwrap();
-        repl_conn.drop_table(*table_id).await?;
+        let repl_conn = self.connections.get_mut(&table_uri).unwrap();
+        repl_conn.drop_table(table_id).await?;
         if repl_conn.table_readers_count() == 0 {
-            repl_conn.drop_publication().await?;
-            repl_conn.drop_replication_slot().await?;
-            self.connections.remove(table_uri);
+            self.shutdown_connection(&table_uri).await?;
         }
 
         info!(table_id, "table dropped through manager");
@@ -108,5 +106,14 @@ impl<T: Eq + Hash> ReplicationManager<T> {
         let (uri, table_id) = self.table_info.get(table_id).expect("table not found");
         let connection = self.connections.get_mut(uri).expect("connection not found");
         connection.get_iceberg_table_event_manager(*table_id)
+    }
+
+    /// Gracefully shutdown a replication connection by its URI.
+    pub async fn shutdown_connection(&mut self, uri: &str) -> Result<()> {
+        if let Some(mut conn) = self.connections.remove(uri) {
+            conn.shutdown().await?;
+            self.table_info.retain(|_, (u, _)| u != uri);
+        }
+        Ok(())
     }
 }
