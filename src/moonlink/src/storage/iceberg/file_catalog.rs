@@ -211,6 +211,7 @@ impl FileCatalog {
     }
 
     /// List all objects under the given directory.
+    #[tracing::instrument(name = "list_objects", skip_all)]
     async fn list_objects_under_directory(
         &self,
         folder: &str,
@@ -234,6 +235,7 @@ impl FileCatalog {
     /// List all direct sub-directory under the given directory.
     ///
     /// For example, we have directory "a", "a/b", "a/b/c", listing direct subdirectories for "a" will return "a/b".
+    #[tracing::instrument(name = "list_subdirs", skip_all)]
     async fn list_direct_subdirectories(
         &self,
         folder: &str,

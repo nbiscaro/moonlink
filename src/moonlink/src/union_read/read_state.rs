@@ -9,7 +9,8 @@ use crate::table_notify::TableNotify;
 use crate::NonEvictableHandle;
 
 use bincode::config;
-use tracing::warn;
+use tracing::Instrument;
+use tracing::{info_span, warn};
 
 const BINCODE_CONFIG: config::Configuration = config::standard();
 
@@ -47,13 +48,16 @@ impl Drop for ReadState {
         }
         let associated_files = std::mem::take(&mut self.associated_files);
         // Perform best-effort deletion by spawning detached task.
-        tokio::spawn(async move {
-            for file in associated_files.into_iter() {
-                if let Err(e) = tokio::fs::remove_file(&file).await {
-                    warn!(%file, error = ?e, "failed to delete associated file");
+        tokio::spawn(
+            async move {
+                for file in associated_files.into_iter() {
+                    if let Err(e) = tokio::fs::remove_file(&file).await {
+                        warn!(%file, error = ?e, "failed to delete associated file");
+                    }
                 }
             }
-        });
+            .instrument(info_span!("read_state_cleanup")),
+        );
     }
 }
 
