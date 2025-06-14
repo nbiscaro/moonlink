@@ -53,6 +53,7 @@ tokio-bitstream-io = "0.0.7"
 tokio-postgres = { git = "https://github.com/Mooncake-labs/rust-postgres.git" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+console-subscriber = "0.2"
 url = "2.5"
 uuid = { version = "1.17", default-features = false, features = ["v4"] }
 
