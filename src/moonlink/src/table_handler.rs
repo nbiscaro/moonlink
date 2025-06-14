@@ -10,7 +10,8 @@ use std::collections::BTreeMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
-use tracing::{error, info, warn};
+use tracing::Instrument;
+use tracing::{error, info, info_span, warn};
 
 /// Event types that can be processed by the TableHandler
 #[derive(Debug)]
@@ -71,16 +72,19 @@ impl TableHandler {
         table.register_table_notify(table_notify_tx.clone()).await;
 
         // Spawn the task with the oneshot receiver
-        let event_handle = Some(tokio::spawn(async move {
-            Self::event_loop(
-                iceberg_event_sync_sender,
-                event_receiver,
-                table_notify_tx,
-                table_notify_rx,
-                table,
-            )
-            .await;
-        }));
+        let event_handle = Some(tokio::spawn(
+            async move {
+                Self::event_loop(
+                    iceberg_event_sync_sender,
+                    event_receiver,
+                    table_notify_tx,
+                    table_notify_rx,
+                    table,
+                )
+                .await;
+            }
+            .instrument(info_span!("table_event_loop")),
+        ));
 
         // Create the handler
         Self {
@@ -95,6 +99,7 @@ impl TableHandler {
     }
 
     /// Main event processing loop
+    #[tracing::instrument(name = "table_event_loop", skip_all)]
     async fn event_loop(
         iceberg_event_sync_sender: IcebergEventSyncSender,
         mut event_receiver: Receiver<TableEvent>,
