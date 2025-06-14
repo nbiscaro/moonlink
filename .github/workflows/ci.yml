@@ -94,3 +94,14 @@ jobs:
         with:
           files: target/nextest/ci/junit.xml
           fail_ci_if_error: true
+
+      # ---------- Upload coverage report to Codecov ----------
+      - name: Upload coverage (lcov)
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v5
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        with:
+          files: lcov.info
+          fail_ci_if_error: true
+
