@@ -54,7 +54,7 @@ jobs:
 
   # ───────────────────────── 2 · TEST & COVERAGE ────────────────────────────
   coverage:
-    name: Unit Tests + Coverage (llvm-cov)
+    name: Unit Tests + Coverage (llvm-cov + nextest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,17 +70,26 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with: { tool: cargo-llvm-cov }
+      - uses: taiki-e/install-action@v2
+        with: { tool: nextest }
 
-      - name: Run tests and generate lcov.info
+      # ---------- Run the suite through nextest ----------
+      - name: Run tests via llvm-cov/nextest
+        id: run_tests
         run: |
-          cargo llvm-cov --locked --lib \
-                         --lcov --output-path lcov.info
+          cargo llvm-cov \
+            --locked \
+            --lib \
+            --lcov --output-path lcov.info \
+            nextest \
+              --profile ci \
+              --no-fail-fast
 
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+      # ---------- Upload JUnit test results to Codecov ----------
+      - name: Upload test results (JUnit)
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
-          files: lcov.info
-          verbose: true
-          fail_ci_if_error: true
+          files: target/nextest/ci/junit.xml
