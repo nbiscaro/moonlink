@@ -75,7 +75,6 @@ jobs:
 
       # ---------- Run the suite through nextest ----------
       - name: Run tests via llvm-cov/nextest
-        id: run_tests
         run: |
           cargo llvm-cov \
             --locked \
