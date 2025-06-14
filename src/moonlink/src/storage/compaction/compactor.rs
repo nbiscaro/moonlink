@@ -136,6 +136,7 @@ impl CompactionBuilder {
 
     /// Util function to read the given parquet file, apply the corresponding deletion vector, and write it to the given arrow writer.
     /// Return the data file mapping, and cache evicted data files to delete.
+    #[tracing::instrument(name = "apply_deletion_vec", skip_all)]
     async fn apply_deletion_vector_and_write(
         &mut self,
         data_file_to_compact: SingleFileToCompact,
@@ -232,6 +233,7 @@ impl CompactionBuilder {
     }
 
     /// Util function to compact the given data files, with their corresponding deletion vector applied.
+    #[tracing::instrument(name = "compact_data_files", skip_all)]
     async fn compact_data_files(
         &mut self,
     ) -> Result<(DataFileRemap, Vec<String> /*evicted files to delete*/)> {
@@ -295,6 +297,7 @@ impl CompactionBuilder {
     }
 
     /// Perform a compaction operation, and get the result back.
+    #[tracing::instrument(name = "compaction_build", skip_all)]
     pub(crate) async fn build(mut self) -> Result<DataCompactionResult> {
         let old_data_files = self
             .compaction_payload
