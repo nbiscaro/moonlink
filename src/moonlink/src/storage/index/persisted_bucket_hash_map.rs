@@ -513,6 +513,7 @@ impl GlobalIndexBuilder {
         self.build_from_merging_iterator(merge_iter).await
     }
 
+    #[tracing::instrument(name = "index_merge", skip_all)]
     async fn build_from_merging_iterator(
         mut self,
         mut iter: GlobalIndexMergingIterator<'_>,
@@ -576,6 +577,7 @@ impl GlobalIndexBuilder {
         .await
     }
 
+    #[tracing::instrument(name = "index_merge", skip_all)]
     async fn build_from_merging_iterator_with_predicate<GetRemappedRecLoc, GetSegIdx>(
         mut self,
         mut iter: GlobalIndexMergingIterator<'_>,
@@ -732,6 +734,7 @@ impl<'a> GlobalIndexIterator<'a> {
         }
     }
 
+    #[tracing::instrument(name = "index_iter_next", skip_all)]
     pub async fn next(
         &mut self,
     ) -> Option<(
@@ -791,6 +794,7 @@ impl Ord for HeapItem<'_> {
 }
 
 impl<'a> GlobalIndexMergingIterator<'a> {
+    #[tracing::instrument(name = "merge_iter_new", skip_all)]
     pub async fn new(iterators: Vec<GlobalIndexIterator<'a>>) -> Self {
         let mut heap = BinaryHeap::new();
         for mut it in iterators {
@@ -801,6 +805,7 @@ impl<'a> GlobalIndexMergingIterator<'a> {
         Self { heap }
     }
 
+    #[tracing::instrument(name = "merge_iter_next", skip_all)]
     pub async fn next(&mut self) -> Option<(u64, usize, usize)> {
         if let Some(mut heap_item) = self.heap.pop() {
             let result = heap_item.value;
