@@ -45,6 +45,8 @@ use table_snapshot::{IcebergSnapshotImportResult, IcebergSnapshotIndexMergeResul
 #[cfg(test)]
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
+use tracing::info_span;
+use tracing::Instrument;
 use transaction_stream::{TransactionStreamOutput, TransactionStreamState};
 
 use arrow::record_batch::RecordBatch;
@@ -765,12 +767,15 @@ impl MooncakeTable {
         self.next_snapshot_task = SnapshotTask::new(self.metadata.config.clone());
         let cur_snapshot = self.snapshot.clone();
         // Create a detached task, whose completion will be notified separately.
-        tokio::task::spawn(Self::create_snapshot_async(
-            cur_snapshot,
-            next_snapshot_task,
-            opt,
-            self.table_notify.as_ref().unwrap().clone(),
-        ));
+        tokio::task::spawn(
+            Self::create_snapshot_async(
+                cur_snapshot,
+                next_snapshot_task,
+                opt,
+                self.table_notify.as_ref().unwrap().clone(),
+            )
+            .instrument(info_span!("create_snapshot_async")),
+        );
     }
 
     /// If a mooncake snapshot is not going to be created, return false immediately.
@@ -799,16 +804,19 @@ impl MooncakeTable {
         let table_notify_tx_copy = self.table_notify.as_ref().unwrap().clone();
 
         // Create a detached task, whose completion will be notified separately.
-        tokio::task::spawn(async move {
-            let builder = CompactionBuilder::new(compaction_payload, schema_ref, file_params);
-            let data_compaction_result = builder.build().await;
-            table_notify_tx_copy
-                .send(TableNotify::DataCompaction {
-                    data_compaction_result,
-                })
-                .await
-                .unwrap();
-        });
+        tokio::task::spawn(
+            async move {
+                let builder = CompactionBuilder::new(compaction_payload, schema_ref, file_params);
+                let data_compaction_result = builder.build().await;
+                table_notify_tx_copy
+                    .send(TableNotify::DataCompaction {
+                        data_compaction_result,
+                    })
+                    .await
+                    .unwrap();
+            }
+            .instrument(info_span!("data_compaction")),
+        );
     }
 
     pub(crate) fn notify_snapshot_reader(&self, lsn: u64) {
@@ -929,11 +937,14 @@ impl MooncakeTable {
     pub(crate) fn persist_iceberg_snapshot(&mut self, snapshot_payload: IcebergSnapshotPayload) {
         let iceberg_table_manager = self.iceberg_table_manager.take().unwrap();
         // Create a detached task, whose completion will be notified separately.
-        tokio::task::spawn(Self::persist_iceberg_snapshot_impl(
-            iceberg_table_manager,
-            snapshot_payload,
-            self.table_notify.as_ref().unwrap().clone(),
-        ));
+        tokio::task::spawn(
+            Self::persist_iceberg_snapshot_impl(
+                iceberg_table_manager,
+                snapshot_payload,
+                self.table_notify.as_ref().unwrap().clone(),
+            )
+            .instrument(info_span!("persist_iceberg_snapshot")),
+        );
     }
 
     /// Drop an iceberg table.
