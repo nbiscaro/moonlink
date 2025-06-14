@@ -76,6 +76,7 @@ impl DiskSliceWriter {
     }
 
     /// Apply deletion vector to in-memory batches, write to parquet files and remap index.
+    #[tracing::instrument(name = "disk_slice_write", skip_all)]
     pub(super) async fn write(&mut self) -> Result<()> {
         let mut filtered_batches = Vec::new();
         let mut id = 0;
@@ -123,6 +124,7 @@ impl DiskSliceWriter {
 
     /// Write record batches to parquet files in synchronous mode.
     /// TODO(hjiang): Parallelize the parquet file write operations.
+    #[tracing::instrument(name = "write_parquet_batches", skip_all)]
     async fn write_batch_to_parquet(
         &mut self,
         record_batches: &Vec<(usize, RecordBatch, Vec<usize>)>,
@@ -192,6 +194,7 @@ impl DiskSliceWriter {
         Ok(())
     }
 
+    #[tracing::instrument(name = "remap_disk_index", skip_all)]
     async fn remap_index(&mut self) -> Result<()> {
         if self.old_index().is_empty() {
             return Ok(());
