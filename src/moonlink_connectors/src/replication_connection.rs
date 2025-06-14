@@ -21,7 +21,8 @@ use std::path::Path;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_postgres::{connect, Client, Config, NoTls};
-use tracing::{debug, error, info, warn};
+use tracing::Instrument;
+use tracing::{debug, error, info, info_span, warn};
 
 pub enum Command {
     AddTable {
@@ -66,11 +67,14 @@ impl ReplicationConnection {
         let (postgres_client, connection) = connect(&uri, NoTls)
             .await
             .map_err(PostgresSourceError::from)?;
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                warn!("connection error: {}", e);
+        tokio::spawn(
+            async move {
+                if let Err(e) = connection.await {
+                    warn!("connection error: {}", e);
+                }
             }
-        });
+            .instrument(info_span!("postgres_connection_monitor")),
+        );
         postgres_client
             .simple_query(
                 "DROP PUBLICATION IF EXISTS moonlink_pub; CREATE PUBLICATION moonlink_pub WITH (publish_via_partition_root = true);",
@@ -217,7 +221,9 @@ impl ReplicationConnection {
         debug!("spawning replication task");
         if let Err(e) = self.source.commit_transaction().await {
             error!(error = ?e, "failed to commit transaction");
-            return tokio::spawn(async { Err(e.into()) });
+            return tokio::spawn(
+                async { Err(e.into()) }.instrument(info_span!("replication_task_error")),
+            );
         }
 
         // TODO: track tables copied in replication state and recover these before starting the event loop.
@@ -226,11 +232,16 @@ impl ReplicationConnection {
             Ok(s) => s,
             Err(e) => {
                 error!(error = ?e, "failed to get cdc stream");
-                return tokio::spawn(async { Err(e.into()) });
+                return tokio::spawn(
+                    async { Err(e.into()) }.instrument(info_span!("replication_task_error")),
+                );
             }
         };
 
-        tokio::spawn(async move { run_event_loop(stream, sink, cmd_rx).await })
+        tokio::spawn(
+            async move { run_event_loop(stream, sink, cmd_rx).await }
+                .instrument(info_span!("replication_event_loop")),
+        )
     }
 
     async fn add_table_to_replication(&mut self, schema: &TableSchema) -> Result<()> {
@@ -365,6 +376,7 @@ impl ReplicationConnection {
     }
 }
 
+#[tracing::instrument(name = "replication_event_loop", skip_all)]
 async fn run_event_loop(
     stream: CdcStream,
     mut sink: Sink,

@@ -8,7 +8,8 @@ use tokio_postgres::{
     types::{Kind, PgLsn, Type},
     Client as PostgresClient, Config, CopyOutStream, NoTls, SimpleQueryMessage, SimpleQueryRow,
 };
-use tracing::{info, warn};
+use tracing::Instrument;
+use tracing::{info, info_span, warn};
 
 use crate::pg_replicate::conversions::text::TextFormatConverter;
 use crate::pg_replicate::table::{ColumnSchema, LookupKey, TableId, TableName, TableSchema};
@@ -65,12 +66,15 @@ impl ReplicationClient {
         config.replication_mode(ReplicationMode::Logical);
         let (postgres_client, connection) = config.connect(NoTls).await?;
 
-        tokio::spawn(async move {
-            info!("waiting for connection to terminate");
-            if let Err(e) = connection.await {
-                warn!("connection error: {}", e);
+        tokio::spawn(
+            async move {
+                info!("waiting for connection to terminate");
+                if let Err(e) = connection.await {
+                    warn!("connection error: {}", e);
+                }
             }
-        });
+            .instrument(info_span!("postgres_client_monitor")),
+        );
 
         info!("successfully connected to postgres");
 
