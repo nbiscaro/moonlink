@@ -73,7 +73,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with: { tool: nextest }
 
-      # ---------- Run the suite through nextest ----------
+      # ---------- Run the suite through llvm-cov and nextest ----------
       - name: Run tests via llvm-cov/nextest
         run: |
           cargo llvm-cov \
