@@ -35,6 +35,7 @@ impl ReadStateManager {
 
     /// Attempts to read state at or after the specified LSN.
     /// If `lsn` is `None`, it attempts to read the latest available state.
+    #[tracing::instrument(name = "read_state_try_read", skip_all)]
     pub async fn try_read(&self, requested_lsn: Option<u64>) -> Result<Arc<SnapshotReadOutput>> {
         // 1. Early exit: If a specific LSN is requested and it's older than our last read,
         //    return the cached state.
@@ -100,6 +101,7 @@ impl ReadStateManager {
         }
     }
 
+    #[tracing::instrument(name = "update_read_state", skip_all)]
     async fn read_from_snapshot_and_update_cache(
         &self,
         current_snapshot_lsn: u64,
@@ -128,6 +130,7 @@ impl ReadStateManager {
         Ok(last_read_snapshot_output_guard.clone())
     }
 
+    #[tracing::instrument(name = "wait_for_lsn", skip_all)]
     async fn wait_for_relevant_lsn_change(
         &self,
         requested_lsn_val: u64,
