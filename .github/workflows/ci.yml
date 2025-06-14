@@ -93,3 +93,4 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
           files: target/nextest/ci/junit.xml
+          fail_ci_if_error: true
