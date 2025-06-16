@@ -98,6 +98,19 @@ mod tests {
         (temp_dir, backend, client)
     }
 
+    /// Standard cleanup.
+    async fn cleanup_test(
+        backend: &MoonlinkBackend<&'static str>,
+        table_name: &'static str,
+        uri: &'static str,
+        tmp: Option<TempDir>,
+    ) {
+        backend.drop_table(table_name).await.unwrap();
+        backend.shutdown_connection(uri).await.unwrap();
+        recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
+        drop(tmp);
+    }
+
     /// Reusable helper for the "create table / insert rows / detect change"
     /// scenario used in two places.
     async fn smoke_create_and_insert(
@@ -157,21 +170,12 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_moonlink_service() {
-        let temp_dir = TempDir::new().unwrap();
-        let uri = URI;
-        let backend =
-            MoonlinkBackend::<&'static str>::new(temp_dir.path().to_str().unwrap().into());
+        let (_tmp, backend, client) = setup_backend("test").await;
 
-        let (client, conn) = connect(uri, NoTls).await.unwrap();
-        tokio::spawn(async move {
-            let _ = conn.await;
-        });
-
-        smoke_create_and_insert(&backend, &client, uri).await;
+        smoke_create_and_insert(&backend, &client, URI).await;
         backend.drop_table("test").await.unwrap();
-        smoke_create_and_insert(&backend, &client, uri).await;
-        backend.drop_table("test").await.unwrap();
-        backend.shutdown_connection(URI).await.unwrap();
+        smoke_create_and_insert(&backend, &client, URI).await;
+        cleanup_test(&backend, "test", URI, None).await;
     }
 
     /// End-to-end: inserts should appear in `scan_table`.
@@ -199,10 +203,7 @@ mod tests {
         let ids = ids_from_state(&backend.scan_table(&"scan_test", Some(lsn)).await.unwrap());
         assert_eq!(ids, HashSet::from([1, 2, 3]));
 
-        backend.drop_table("scan_test").await.unwrap();
-        backend.shutdown_connection(URI).await.unwrap();
-        recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
-        drop(tmp);
+        cleanup_test(&backend, "scan_test", URI, Some(tmp)).await;
     }
 
     /// `scan_table(..., Some(lsn))` should return rows up to that LSN.
@@ -229,9 +230,7 @@ mod tests {
         let ids = ids_from_state(&backend.scan_table(&"lsn_test", Some(lsn2)).await.unwrap());
         assert_eq!(ids, HashSet::from([1, 2]));
 
-        backend.drop_table("lsn_test").await.unwrap();
-        backend.shutdown_connection(URI).await.unwrap();
-        recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
+        cleanup_test(&backend, "lsn_test", URI, None).await;
     }
 
     /// Validates that `create_iceberg_snapshot` writes Iceberg metadata.
@@ -263,9 +262,7 @@ mod tests {
         assert!(meta_dir.exists());
         assert!(meta_dir.read_dir().unwrap().next().is_some());
 
-        backend.drop_table("snapshot_test").await.unwrap();
-        backend.shutdown_connection(URI).await.unwrap();
-        recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
+        cleanup_test(&backend, "snapshot_test", URI, Some(tmp)).await;
     }
 
     /// Test that replication connections are properly cleaned up and can be recreated.
@@ -274,28 +271,14 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_replication_connection_cleanup() {
-        let temp_dir = TempDir::new().unwrap();
-        let uri = URI;
-        let backend =
-            MoonlinkBackend::<&'static str>::new(temp_dir.path().to_str().unwrap().into());
+        let (_tmp, backend, client) = setup_backend("repl_test").await;
 
-        let (client, conn) = connect(uri, NoTls).await.unwrap();
-        tokio::spawn(async move {
-            let _ = conn.await;
-        });
-
-        // Create the test table
-        client
-            .simple_query(
-                "DROP TABLE IF EXISTS repl_test;
-                 CREATE TABLE repl_test (id BIGINT PRIMARY KEY, name TEXT);",
-            )
-            .await
-            .unwrap();
+        // Drop the table that setup_backend created so we can test the full cycle
+        backend.drop_table("repl_test").await.unwrap();
 
         // First cycle: add table, insert data, verify it works
         backend
-            .create_table("repl_test", "public.repl_test", uri)
+            .create_table("repl_test", "public.repl_test", URI)
             .await
             .unwrap();
 
@@ -313,7 +296,7 @@ mod tests {
 
         // Second cycle: add table again, insert different data, verify it works
         backend
-            .create_table("repl_test", "public.repl_test", uri)
+            .create_table("repl_test", "public.repl_test", URI)
             .await
             .unwrap();
 
@@ -328,8 +311,6 @@ mod tests {
         assert_eq!(ids, HashSet::from([2]));
 
         // Clean up
-        backend.drop_table("repl_test").await.unwrap();
-        backend.shutdown_connection(URI).await.unwrap();
-        recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
+        cleanup_test(&backend, "repl_test", URI, None).await;
     }
 }
