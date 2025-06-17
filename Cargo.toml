@@ -36,7 +36,7 @@ parquet = { version = "55", default-features = false, features = [
   "async",
   "arrow_canonical_extension_types",
 ] }
-postgres-replication = { git = "https://github.com/Mooncake-labs/rust-postgres.git" }
+postgres-replication = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "e6bd7d5cacc4eb7a03930b5ca3db1ef9caf0a3d5" }
 rand = "0.9"
 roaring = "0.10"
 serde = { version = "1.0", default-features = false, features = ["derive"] }
@@ -50,7 +50,7 @@ tokio = { version = "1.45", default-features = false, features = [
   "time",
 ] }
 tokio-bitstream-io = "0.0.7"
-tokio-postgres = { git = "https://github.com/Mooncake-labs/rust-postgres.git" }
+tokio-postgres = { git = "https://github.com/Mooncake-labs/rust-postgres.git", rev = "e6bd7d5cacc4eb7a03930b5ca3db1ef9caf0a3d5" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.5"
@@ -59,3 +59,7 @@ uuid = { version = "1.17", default-features = false, features = ["v4"] }
 [profile.release-with-debug]
 inherits = "release"
 debug = true
+
+[patch.crates-io]
+postgres-types = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "e6bd7d5cacc4eb7a03930b5ca3db1ef9caf0a3d5" }
+postgres-protocol = { git = "https://github.com/Mooncake-Labs/rust-postgres.git", rev = "e6bd7d5cacc4eb7a03930b5ca3db1ef9caf0a3d5" }
