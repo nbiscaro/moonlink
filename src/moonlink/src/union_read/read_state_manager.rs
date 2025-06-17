@@ -33,17 +33,34 @@ impl ReadStateManager {
         }
     }
 
+    #[inline]
+    fn should_use_cache(
+        requested: Option<u64>,
+        cached_lsn: u64,
+        snapshot_lsn: u64,
+        commit_lsn: u64,
+    ) -> bool {
+        let snapshot_clean = snapshot_lsn == commit_lsn;
+        match requested {
+            Some(bound) => cached_lsn == snapshot_lsn && cached_lsn <= bound,
+            None => cached_lsn == snapshot_lsn && snapshot_clean,
+        }
+    }
+
     /// Attempts to read state at or after the specified LSN.
     /// If `lsn` is `None`, it attempts to read the latest available state.
     #[tracing::instrument(name = "read_state_try_read", skip_all)]
     pub async fn try_read(&self, requested_lsn: Option<u64>) -> Result<Arc<SnapshotReadOutput>> {
-        // 1. Early exit: If a specific LSN is requested and it's older than our last read,
-        //    return the cached state.
-        if let Some(req_lsn_val) = requested_lsn {
-            if req_lsn_val < self.last_read_lsn.load(Ordering::Relaxed) {
-                let last_read_snapshot_output = self.last_read_snapshot_output.read().await;
-                return Ok(last_read_snapshot_output.clone());
-            }
+        // fast-path: reuse cached snapshot only when its still the tables latest and not newer than the callers LSN
+        let cached_lsn = self.last_read_lsn.load(Ordering::Relaxed);
+        let snapshot_lsn_now = *self.table_snapshot_watch_receiver.borrow();
+        let commit_lsn_now = *self.last_commit_lsn_rx.borrow();
+
+        let use_cache =
+            Self::should_use_cache(requested_lsn, cached_lsn, snapshot_lsn_now, commit_lsn_now);
+
+        if use_cache {
+            return Ok(self.last_read_snapshot_output.read().await.clone());
         }
 
         let mut table_snapshot_rx = self.table_snapshot_watch_receiver.clone();
@@ -150,5 +167,64 @@ impl ReadStateManager {
                 .map_err(|e| Error::WatchChannelRecvError { source: e })?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_decision_matrix() {
+        struct Case {
+            requested: Option<u64>,
+            cached: u64,
+            snap: u64,
+            commit: u64,
+            expect: bool,
+        }
+
+        let cases = [
+            // hit: bounded read, snapshot is latest and within bound
+            Case {
+                requested: Some(42),
+                cached: 42,
+                snap: 42,
+                commit: 42,
+                expect: true,
+            },
+            // miss: bounded read, cache newer than caller wants
+            Case {
+                requested: Some(10),
+                cached: 20,
+                snap: 20,
+                commit: 20,
+                expect: false,
+            },
+            // hit: latest read, snapshot clean
+            Case {
+                requested: None,
+                cached: 100,
+                snap: 100,
+                commit: 100,
+                expect: true,
+            },
+            // miss: latest read, table advanced since cache
+            Case {
+                requested: None,
+                cached: 50,
+                snap: 60,
+                commit: 60,
+                expect: false,
+            },
+        ];
+
+        for (i, c) in cases.iter().enumerate() {
+            assert_eq!(
+                ReadStateManager::should_use_cache(c.requested, c.cached, c.snap, c.commit),
+                c.expect,
+                "case {i} failed"
+            );
+        }
     }
 }
