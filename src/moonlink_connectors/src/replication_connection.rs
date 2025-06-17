@@ -297,15 +297,10 @@ impl ReplicationConnection {
 
     pub async fn start_replication(&mut self) -> Result<()> {
         info!("starting replication");
-        let table_schemas = self.source.get_table_schemas().await;
 
         let (tx, rx) = mpsc::channel(8);
         self.cmd_tx = tx;
         self.cmd_rx = Some(rx);
-
-        for schema in table_schemas.values() {
-            self.add_table_to_replication(schema).await?;
-        }
 
         let sink = Sink::new(self.replication_state.clone());
         let receiver = self.cmd_rx.take().unwrap();
