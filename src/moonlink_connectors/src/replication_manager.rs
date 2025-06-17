@@ -73,13 +73,13 @@ impl<T: Eq + Hash> ReplicationManager<T> {
         }
         let replication_connection = self.connections.get_mut(uri).unwrap();
 
-        let table_id = replication_connection.add_table(table_name).await?;
-        self.table_info
-            .insert(external_table_id, (uri.to_string(), table_id));
-
         if !replication_connection.replication_started() {
             replication_connection.start_replication().await?;
         }
+
+        let table_id = replication_connection.add_table(table_name).await?;
+        self.table_info
+            .insert(external_table_id, (uri.to_string(), table_id));
 
         info!(table_id, "table added through manager");
 
