@@ -9,13 +9,13 @@ profiling = []
 
 [dependencies]
 arrow-array.workspace = true
+console-subscriber = { workspace = true }
 moonlink = { path = "../moonlink", features = ["test-utils"] }
 moonlink_connectors = { path = "../moonlink_connectors" }
 parquet = { workspace = true, features = ["arrow"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
-console-subscriber = { workspace = true }
 
 [dev-dependencies]
 serial_test = "3.0"

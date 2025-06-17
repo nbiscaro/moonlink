@@ -9,7 +9,7 @@ pub fn init_logging() {
         .with(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")), // fallback
         )
-        .with(fmt::layer().with_writer(|| io::stderr()).with_ansi(false));
+        .with(fmt::layer().with_writer(io::stderr).with_ansi(false));
 
     #[cfg(feature = "profiling")]
     let registry = registry.with(console_subscriber::spawn());
