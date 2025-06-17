@@ -47,8 +47,9 @@ impl ReadStateManager {
         }
     }
 
-    /// Attempts to read state at or after the specified LSN.
-    /// If `lsn` is `None`, it attempts to read the latest available state.
+    /// Returns a snapshot whose commit LSN is:
+    /// • ≤ `requested_lsn` when `requested_lsn` is supplied, or
+    /// • the latest snapshot when `requested_lsn` is `None`.
     #[tracing::instrument(name = "read_state_try_read", skip_all)]
     pub async fn try_read(&self, requested_lsn: Option<u64>) -> Result<Arc<SnapshotReadOutput>> {
         // fast-path: reuse cached snapshot only when its still the tables latest and not newer than the callers LSN
