@@ -42,7 +42,7 @@ impl ReadStateManager {
     ) -> bool {
         let snapshot_clean = snapshot_lsn == commit_lsn;
         match requested {
-            Some(bound) => cached_lsn == snapshot_lsn && cached_lsn <= bound,
+            Some(bound) => cached_lsn == snapshot_lsn && cached_lsn <= bound && snapshot_clean,
             None => cached_lsn == snapshot_lsn && snapshot_clean,
         }
     }
