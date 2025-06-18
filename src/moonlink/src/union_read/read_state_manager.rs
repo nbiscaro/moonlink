@@ -40,6 +40,11 @@ impl ReadStateManager {
         snapshot_lsn: u64,
         commit_lsn: u64,
     ) -> bool {
+        // Never use cache if it's uninitialized (cached_lsn = 0)
+        if cached_lsn == 0 {
+            return false;
+        }
+
         let snapshot_clean = snapshot_lsn == commit_lsn;
         match requested {
             Some(bound) => cached_lsn == snapshot_lsn && cached_lsn <= bound && snapshot_clean,
@@ -216,6 +221,54 @@ mod tests {
                 cached: 50,
                 snap: 60,
                 commit: 60,
+                expect: false,
+            },
+            // miss: bounded read, dirty snapshot (snapshot behind commit)
+            Case {
+                requested: Some(20),
+                cached: 10,
+                snap: 10,
+                commit: 20,
+                expect: false,
+            },
+            // miss: bounded read, dirty snapshot (snapshot ahead of commit)
+            Case {
+                requested: Some(30),
+                cached: 25,
+                snap: 25,
+                commit: 20,
+                expect: false,
+            },
+            // miss: latest read, dirty snapshot (snapshot behind commit)
+            Case {
+                requested: None,
+                cached: 50,
+                snap: 50,
+                commit: 60,
+                expect: false,
+            },
+            // miss: latest read, dirty snapshot (snapshot ahead of commit)
+            Case {
+                requested: None,
+                cached: 70,
+                snap: 70,
+                commit: 65,
+                expect: false,
+            },
+            // miss: uninitialized cache (cached_lsn = 0)
+            Case {
+                requested: Some(10),
+                cached: 0,
+                snap: 10,
+                commit: 10,
+                expect: false,
+            },
+            // miss: uninitialized cache for latest read
+            Case {
+                requested: None,
+                cached: 0,
+                snap: 10,
+                commit: 10,
                 expect: false,
             },
         ];
