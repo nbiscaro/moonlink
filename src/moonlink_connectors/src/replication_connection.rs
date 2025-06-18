@@ -181,17 +181,14 @@ impl ReplicationConnection {
             "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = '{}';",
             self.slot_name
         );
-        self.postgres_client
-            .simple_query(&terminate_query)
-            .await
-            .unwrap();
+        let _ = self.postgres_client.simple_query(&terminate_query).await;
 
         // Then drop the replication slot
         let drop_query = format!("SELECT pg_drop_replication_slot('{}');", self.slot_name);
         self.postgres_client
             .simple_query(&drop_query)
             .await
-            .unwrap();
+            .map_err(PostgresSourceError::from)?;
 
         Ok(())
     }
