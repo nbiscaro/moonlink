@@ -18,6 +18,42 @@ mod tests {
 
     // ───────────────────── Helper functions & fixtures ─────────────────────
 
+    struct TestGuard {
+        backend: Arc<MoonlinkBackend<&'static str>>,
+        table_name: &'static str,
+        tmp: Option<TempDir>,
+    }
+
+    impl TestGuard {
+        async fn new(table_name: &'static str) -> (Self, Client) {
+            let (tmp, backend, client) = setup_backend(table_name).await;
+            let guard = Self {
+                backend: Arc::new(backend),
+                table_name,
+                tmp: Some(tmp),
+            };
+            (guard, client)
+        }
+    }
+
+    impl Drop for TestGuard {
+        fn drop(&mut self) {
+            // move everything we need into the async block
+            let backend = Arc::clone(&self.backend);
+            let table = self.table_name;
+            let tmp = self.tmp.take();
+
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async move {
+                    let _ = backend.drop_table(table).await;
+                    let _ = backend.shutdown_connection(URI).await;
+                    let _ = recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH);
+                    drop(tmp);
+                });
+            });
+        }
+    }
+
     /// Return the current WAL LSN as a simple `u64`.
     async fn current_wal_lsn(client: &Client) -> u64 {
         let row = client
@@ -298,42 +334,6 @@ mod tests {
         let ids = ids_from_state(&backend.scan_table(&"repl_test", None).await.unwrap());
         // Should only see the new row (2), not the old one (1)
         assert_eq!(ids, HashSet::from([2]));
-    }
-
-    struct TestGuard {
-        backend: Arc<MoonlinkBackend<&'static str>>,
-        table_name: &'static str,
-        tmp: Option<TempDir>,
-    }
-
-    impl TestGuard {
-        async fn new(table_name: &'static str) -> (Self, Client) {
-            let (tmp, backend, client) = setup_backend(table_name).await;
-            let guard = Self {
-                backend: Arc::new(backend),
-                table_name,
-                tmp: Some(tmp),
-            };
-            (guard, client)
-        }
-    }
-
-    impl Drop for TestGuard {
-        fn drop(&mut self) {
-            // move everything we need into the async block
-            let backend = Arc::clone(&self.backend);
-            let table = self.table_name;
-            let tmp = self.tmp.take();
-
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async move {
-                    let _ = backend.drop_table(table).await;
-                    let _ = backend.shutdown_connection(URI).await;
-                    let _ = recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH);
-                    drop(tmp);
-                });
-            });
-        }
     }
 
     /// End-to-end: bulk insert (1M rows)
