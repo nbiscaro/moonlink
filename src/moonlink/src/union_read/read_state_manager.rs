@@ -271,6 +271,22 @@ mod tests {
                 commit: 10,
                 expect: false,
             },
+            // miss: uninitialized cache with all LSNs at 0 (initial state)
+            Case {
+                requested: Some(5),
+                cached: 0,
+                snap: 0,
+                commit: 0,
+                expect: false,
+            },
+            // miss: uninitialized cache with all LSNs at 0 for latest read
+            Case {
+                requested: None,
+                cached: 0,
+                snap: 0,
+                commit: 0,
+                expect: false,
+            },
         ];
 
         for (i, c) in cases.iter().enumerate() {
