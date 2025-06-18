@@ -2,6 +2,7 @@
 mod tests {
     use arrow_array::Int64Array;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::sync::Arc;
     use tempfile::TempDir;
     use tokio_postgres::{connect, types::PgLsn, Client, NoTls};
 
@@ -98,19 +99,6 @@ mod tests {
         (temp_dir, backend, client)
     }
 
-    /// Standard cleanup.
-    async fn cleanup_test(
-        backend: &MoonlinkBackend<&'static str>,
-        table_name: &'static str,
-        uri: &'static str,
-        tmp: Option<TempDir>,
-    ) {
-        backend.drop_table(table_name).await.unwrap();
-        backend.shutdown_connection(uri).await.unwrap();
-        recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH).unwrap();
-        drop(tmp);
-    }
-
     /// Reusable helper for the "create table / insert rows / detect change"
     /// scenario used in two places.
     async fn smoke_create_and_insert(
@@ -167,22 +155,23 @@ mod tests {
     }
 
     /// Validate `create_table` and `drop_table` across successive uses.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_moonlink_service() {
-        let (_tmp, backend, client) = setup_backend("test").await;
+        let (guard, client) = TestGuard::new("test").await;
+        let backend = &guard.backend;
 
         smoke_create_and_insert(&backend, &client, URI).await;
         backend.drop_table("test").await.unwrap();
         smoke_create_and_insert(&backend, &client, URI).await;
-        cleanup_test(&backend, "test", URI, None).await;
     }
 
     /// End-to-end: inserts should appear in `scan_table`.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_scan_returns_inserted_rows() {
-        let (tmp, backend, client) = setup_backend("scan_test").await;
+        let (guard, client) = TestGuard::new("scan_test").await;
+        let backend = &guard.backend;
 
         client
             .simple_query("INSERT INTO scan_test VALUES (1,'a'),(2,'b');")
@@ -202,15 +191,14 @@ mod tests {
 
         let ids = ids_from_state(&backend.scan_table(&"scan_test", Some(lsn)).await.unwrap());
         assert_eq!(ids, HashSet::from([1, 2, 3]));
-
-        cleanup_test(&backend, "scan_test", URI, Some(tmp)).await;
     }
 
     /// `scan_table(..., Some(lsn))` should return rows up to that LSN.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_scan_table_with_lsn() {
-        let (_tmp, backend, client) = setup_backend("lsn_test").await;
+        let (guard, client) = TestGuard::new("lsn_test").await;
+        let backend = &guard.backend;
 
         client
             .simple_query("INSERT INTO lsn_test VALUES (1,'a');")
@@ -229,15 +217,14 @@ mod tests {
 
         let ids = ids_from_state(&backend.scan_table(&"lsn_test", Some(lsn2)).await.unwrap());
         assert_eq!(ids, HashSet::from([1, 2]));
-
-        cleanup_test(&backend, "lsn_test", URI, None).await;
     }
 
     /// Validates that `create_iceberg_snapshot` writes Iceberg metadata.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_create_iceberg_snapshot() {
-        let (tmp, backend, client) = setup_backend("snapshot_test").await;
+        let (guard, client) = TestGuard::new("snapshot_test").await;
+        let backend = &guard.backend;
 
         client
             .simple_query("INSERT INTO snapshot_test VALUES (1,'a');")
@@ -254,24 +241,26 @@ mod tests {
             .unwrap();
 
         // Look for any file in the Iceberg metadata dir.
-        let meta_dir = tmp
+        let meta_dir = guard
+            .tmp
+            .as_ref()
+            .unwrap()
             .path()
             .join("public")
             .join("snapshot_test")
             .join("metadata");
         assert!(meta_dir.exists());
         assert!(meta_dir.read_dir().unwrap().next().is_some());
-
-        cleanup_test(&backend, "snapshot_test", URI, Some(tmp)).await;
     }
 
     /// Test that replication connections are properly cleaned up and can be recreated.
     /// This validates that dropping the last table from a connection properly cleans up
     /// the replication slot, allowing new connections to be established.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_replication_connection_cleanup() {
-        let (_tmp, backend, client) = setup_backend("repl_test").await;
+        let (guard, client) = TestGuard::new("repl_test").await;
+        let backend = &guard.backend;
 
         // Drop the table that setup_backend created so we can test the full cycle
         backend.drop_table("repl_test").await.unwrap();
@@ -309,8 +298,41 @@ mod tests {
         let ids = ids_from_state(&backend.scan_table(&"repl_test", None).await.unwrap());
         // Should only see the new row (2), not the old one (1)
         assert_eq!(ids, HashSet::from([2]));
+    }
 
-        // Clean up
-        cleanup_test(&backend, "repl_test", URI, None).await;
+    struct TestGuard {
+        backend: Arc<MoonlinkBackend<&'static str>>,
+        table_name: &'static str,
+        tmp: Option<TempDir>,
+    }
+
+    impl TestGuard {
+        async fn new(table_name: &'static str) -> (Self, Client) {
+            let (tmp, backend, client) = setup_backend(table_name).await;
+            let guard = Self {
+                backend: Arc::new(backend),
+                table_name,
+                tmp: Some(tmp),
+            };
+            (guard, client)
+        }
+    }
+
+    impl Drop for TestGuard {
+        fn drop(&mut self) {
+            // move everything we need into the async block
+            let backend = Arc::clone(&self.backend);
+            let table = self.table_name;
+            let tmp = self.tmp.take();
+
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async move {
+                    let _ = backend.drop_table(table).await;
+                    let _ = backend.shutdown_connection(URI).await;
+                    let _ = recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH);
+                    drop(tmp);
+                });
+            });
+        }
     }
 }
