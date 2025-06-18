@@ -161,9 +161,9 @@ mod tests {
         let (guard, client) = TestGuard::new("test").await;
         let backend = &guard.backend;
 
-        smoke_create_and_insert(&backend, &client, URI).await;
+        smoke_create_and_insert(backend, &client, URI).await;
         backend.drop_table("test").await.unwrap();
-        smoke_create_and_insert(&backend, &client, URI).await;
+        smoke_create_and_insert(backend, &client, URI).await;
     }
 
     /// End-to-end: inserts should appear in `scan_table`.
