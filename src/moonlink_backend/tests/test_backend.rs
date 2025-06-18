@@ -335,4 +335,42 @@ mod tests {
             });
         }
     }
+
+    /// End-to-end: bulk insert (1M rows)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_bulk_insert_one_million_rows() {
+        let (guard, client) = TestGuard::new("bulk_test").await;
+        let backend = &guard.backend;
+
+        client
+            .simple_query(
+                "INSERT INTO bulk_test (id, name)
+             SELECT gs, 'val_' || gs
+             FROM generate_series(1, 1000000) AS gs;",
+            )
+            .await
+            .unwrap();
+
+        let lsn_after_insert = current_wal_lsn(&client).await;
+
+        let ids = ids_from_state(
+            &backend
+                .scan_table(&"bulk_test", Some(lsn_after_insert))
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(
+            ids.len(),
+            1_000_000,
+            "expected exactly 1 000 000 rows visible in snapshot"
+        );
+        assert!(ids.contains(&1), "row id 1 missing");
+        assert!(ids.contains(&1_000_000), "row id 1_000_000 missing");
+        assert!(
+            ids.len() == 1_000_000,
+            "expected exactly 1_000_000 rows visible in snapshot"
+        );
+    }
 }
