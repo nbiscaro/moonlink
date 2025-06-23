@@ -161,6 +161,7 @@ impl ReplicationConnection {
     }
 
     fn retry_drop(uri: &str, drop_query: &str) -> JoinHandle<Result<()>> {
+        debug!("spawning retry drop");
         let uri = uri.to_string();
         let drop_query = drop_query.to_string();
         tokio::spawn(async move {
@@ -177,6 +178,7 @@ impl ReplicationConnection {
 
     /// Clean up completed retry handles.
     fn cleanup_completed_retries(&mut self) {
+        debug!("cleaning up completed retry handles");
         self.retry_handles.retain(|handle| !handle.is_finished());
     }
 
