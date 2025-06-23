@@ -196,6 +196,10 @@ impl ReplicationConnection {
                     self.retry_handles.push(handle);
                     Ok(vec![])
                 }
+                Some(&SqlState::UNDEFINED_TABLE) => {
+                    warn!("table already dropped, skipping");
+                    Ok(vec![])
+                }
                 _ => Err(PostgresSourceError::from(e)),
             })?;
         Ok(())
