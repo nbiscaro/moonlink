@@ -4,6 +4,7 @@ use crate::{PostgresSourceError, ReplicationConnection};
 use moonlink::{IcebergTableEventManager, ObjectStorageCache, ReadStateManager};
 use std::collections::HashMap;
 use std::hash::Hash;
+use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
 /// Manage replication sources keyed by their connection URI.
@@ -23,6 +24,8 @@ pub struct ReplicationManager<T: Eq + Hash> {
     table_temp_files_directory: String,
     /// Object storage cache.
     object_storage_cache: ObjectStorageCache,
+    /// Background shutdown handles.
+    shutdown_handles: Vec<JoinHandle<Result<()>>>,
 }
 
 impl<T: Eq + Hash> ReplicationManager<T> {
@@ -37,6 +40,7 @@ impl<T: Eq + Hash> ReplicationManager<T> {
             table_base_path,
             table_temp_files_directory,
             object_storage_cache,
+            shutdown_handles: Vec::new(),
         }
     }
 
@@ -100,7 +104,7 @@ impl<T: Eq + Hash> ReplicationManager<T> {
         let repl_conn = self.connections.get_mut(&table_uri).unwrap();
         repl_conn.drop_table(table_id).await?;
         if repl_conn.table_readers_count() == 0 {
-            self.shutdown_connection(&table_uri).await?;
+            self.shutdown_connection(&table_uri);
         }
 
         info!(table_id, "table dropped through manager");
@@ -123,11 +127,19 @@ impl<T: Eq + Hash> ReplicationManager<T> {
     }
 
     /// Gracefully shutdown a replication connection by its URI.
-    pub async fn shutdown_connection(&mut self, uri: &str) -> Result<()> {
-        if let Some(mut conn) = self.connections.remove(uri) {
-            conn.shutdown().await?;
+    pub fn shutdown_connection(&mut self, uri: &str) {
+        // Clean up completed shutdown handles first
+        self.cleanup_completed_shutdowns();
+
+        if let Some(conn) = self.connections.remove(uri) {
+            let shutdown_handle = conn.shutdown();
+            self.shutdown_handles.push(shutdown_handle);
             self.table_info.retain(|_, (u, _)| u != uri);
         }
-        Ok(())
+    }
+
+    /// Clean up completed shutdown handles.
+    fn cleanup_completed_shutdowns(&mut self) {
+        self.shutdown_handles.retain(|handle| !handle.is_finished());
     }
 }

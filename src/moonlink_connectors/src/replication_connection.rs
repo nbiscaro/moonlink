@@ -412,26 +412,28 @@ impl ReplicationConnection {
         }
     }
 
-    pub async fn shutdown(&mut self) -> Result<()> {
-        info!("shutting down replication connection");
-        if self.replication_started {
-            if let Err(e) = self.cmd_tx.send(Command::Shutdown).await {
-                warn!(error = ?e, "failed to send shutdown command");
+    pub fn shutdown(mut self) -> JoinHandle<Result<()>> {
+        tokio::spawn(async move {
+            info!("shutting down replication connection");
+            if self.replication_started {
+                if let Err(e) = self.cmd_tx.send(Command::Shutdown).await {
+                    warn!(error = ?e, "failed to send shutdown command");
+                }
+                if let Some(handle) = self.handle.take() {
+                    let _ = handle.await;
+                }
+                self.replication_started = false;
             }
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.await;
-            }
-            self.replication_started = false;
-        }
 
-        self.drop_publication().await?;
-        self.drop_replication_slot().await?;
+            self.drop_publication().await?;
+            self.drop_replication_slot().await?;
 
-        // Wait for any pending retry operations to complete
-        self.wait_for_pending_retries().await;
+            // Wait for any pending retry operations to complete
+            self.wait_for_pending_retries().await;
 
-        info!("replication connection shut down");
-        Ok(())
+            info!("replication connection shut down");
+            Ok(())
+        })
     }
 }
 
