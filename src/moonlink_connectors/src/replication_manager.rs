@@ -87,10 +87,14 @@ impl<T: Eq + Hash> ReplicationManager<T> {
     }
 
     /// Drop table specified by the given table id.
-    /// Precondition: the table has been registered, otherwise panics.
+    /// If the table is not tracked, logs a message and returns successfully.
     pub async fn drop_table(&mut self, external_table_id: T) -> Result<()> {
-        let Some((table_uri, table_id)) = self.table_info.get(&external_table_id).cloned() else {
-            return Ok(());
+        let (table_uri, table_id) = match self.table_info.get(&external_table_id) {
+            Some(info) => info.clone(),
+            None => {
+                info!("attempted to drop table that is not tracked by moonlink - table may already be dropped");
+                return Ok(());
+            }
         };
         info!(table_id, %table_uri, "dropping table through manager");
         let repl_conn = self.connections.get_mut(&table_uri).unwrap();
