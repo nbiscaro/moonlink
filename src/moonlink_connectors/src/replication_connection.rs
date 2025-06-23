@@ -10,6 +10,7 @@ use moonlink::{IcebergTableEventManager, ObjectStorageCache, ReadStateManager};
 use std::sync::Arc;
 use tokio::pin;
 use tokio::time::Duration;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::types::PgLsn;
 
 use crate::pg_replicate::replication_state::ReplicationState;
@@ -156,25 +157,48 @@ impl ReplicationConnection {
         Ok(())
     }
 
-    async fn remove_table_from_publication(&self, table_name: &str) -> Result<()> {
-        if let Err(e) = self
-            .postgres_client
-            .simple_query(&format!(
-                "ALTER PUBLICATION moonlink_pub DROP TABLE {};",
-                table_name
-            ))
+    fn retry_drop(uri: &str, drop_query: &str) -> JoinHandle<Result<()>> {
+        let uri = uri.to_string();
+        let drop_query = drop_query.to_string();
+        tokio::spawn(async move {
+            let (drop_client, _) = connect(&uri, NoTls)
+                .await
+                .map_err(PostgresSourceError::from)?;
+            drop_client
+                .simple_query(&drop_query)
+                .await
+                .map_err(PostgresSourceError::from)?;
+            Ok(())
+        })
+    }
+
+    async fn attempt_drop_else_retry(&self, drop_query: &str) -> Result<()> {
+        self.postgres_client
+            .simple_query(drop_query)
             .await
-        {
-            warn!(table_name, error = ?e, "failed to remove table from publication, table may already be deleted");
-        }
+            .or_else(|e| match e.code() {
+                Some(&SqlState::LOCK_NOT_AVAILABLE) => {
+                    // TODO: Store the handle and poll the result.
+                    let _ = Self::retry_drop(&self.uri, drop_query);
+                    Ok(vec![])
+                }
+                _ => Err(PostgresSourceError::from(e)),
+            })?;
+        Ok(())
+    }
+
+    async fn remove_table_from_publication(&self, table_name: &str) -> Result<()> {
+        self.attempt_drop_else_retry(&format!(
+            "ALTER PUBLICATION moonlink_pub DROP TABLE {};",
+            table_name
+        ))
+        .await?;
         Ok(())
     }
 
     pub async fn drop_publication(&self) -> Result<()> {
-        self.postgres_client
-            .simple_query("DROP PUBLICATION IF EXISTS moonlink_pub;")
-            .await
-            .map_err(PostgresSourceError::from)?;
+        self.attempt_drop_else_retry("DROP PUBLICATION IF EXISTS moonlink_pub;")
+            .await?;
         Ok(())
     }
 
