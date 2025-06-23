@@ -157,13 +157,16 @@ impl ReplicationConnection {
     }
 
     async fn remove_table_from_publication(&self, table_name: &str) -> Result<()> {
-        self.postgres_client
+        if let Err(e) = self
+            .postgres_client
             .simple_query(&format!(
                 "ALTER PUBLICATION moonlink_pub DROP TABLE {};",
                 table_name
             ))
             .await
-            .unwrap();
+        {
+            warn!(table_name, error = ?e, "failed to remove table from publication, table may already be deleted");
+        }
         Ok(())
     }
 
