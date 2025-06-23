@@ -54,6 +54,8 @@ pub struct ReplicationConnection {
     slot_name: String,
     /// Object storage cache.
     object_storage_cache: ObjectStorageCache,
+    /// Background retry handles for drop operations.
+    retry_handles: Vec<JoinHandle<Result<()>>>,
 }
 
 impl ReplicationConnection {
@@ -121,6 +123,7 @@ impl ReplicationConnection {
             replication_started: false,
             slot_name,
             object_storage_cache,
+            retry_handles: Vec::new(),
         })
     }
 
@@ -172,14 +175,23 @@ impl ReplicationConnection {
         })
     }
 
-    async fn attempt_drop_else_retry(&self, drop_query: &str) -> Result<()> {
+    /// Clean up completed retry handles.
+    fn cleanup_completed_retries(&mut self) {
+        self.retry_handles.retain(|handle| !handle.is_finished());
+    }
+
+    async fn attempt_drop_else_retry(&mut self, drop_query: &str) -> Result<()> {
+        // Clean up any completed retry handles first
+        self.cleanup_completed_retries();
+
         self.postgres_client
             .simple_query(drop_query)
             .await
             .or_else(|e| match e.code() {
                 Some(&SqlState::LOCK_NOT_AVAILABLE) => {
-                    // TODO: Store the handle and poll the result.
-                    let _ = Self::retry_drop(&self.uri, drop_query);
+                    // Store the handle so we can track its completion
+                    let handle = Self::retry_drop(&self.uri, drop_query);
+                    self.retry_handles.push(handle);
                     Ok(vec![])
                 }
                 _ => Err(PostgresSourceError::from(e)),
@@ -187,7 +199,7 @@ impl ReplicationConnection {
         Ok(())
     }
 
-    async fn remove_table_from_publication(&self, table_name: &str) -> Result<()> {
+    async fn remove_table_from_publication(&mut self, table_name: &str) -> Result<()> {
         self.attempt_drop_else_retry(&format!(
             "ALTER PUBLICATION moonlink_pub DROP TABLE {};",
             table_name
@@ -196,7 +208,7 @@ impl ReplicationConnection {
         Ok(())
     }
 
-    pub async fn drop_publication(&self) -> Result<()> {
+    pub async fn drop_publication(&mut self) -> Result<()> {
         self.attempt_drop_else_retry("DROP PUBLICATION IF EXISTS moonlink_pub;")
             .await?;
         Ok(())
@@ -380,6 +392,20 @@ impl ReplicationConnection {
         self.uri == uri
     }
 
+    /// Wait for all pending retry operations to complete.
+    async fn wait_for_pending_retries(&mut self) {
+        if !self.retry_handles.is_empty() {
+            info!(
+                "waiting for {} pending retry operations",
+                self.retry_handles.len()
+            );
+            let handles = std::mem::take(&mut self.retry_handles);
+            for handle in handles {
+                let _ = handle.await;
+            }
+        }
+    }
+
     pub async fn shutdown(&mut self) -> Result<()> {
         info!("shutting down replication connection");
         if self.replication_started {
@@ -394,6 +420,9 @@ impl ReplicationConnection {
 
         self.drop_publication().await?;
         self.drop_replication_slot().await?;
+
+        // Wait for any pending retry operations to complete
+        self.wait_for_pending_retries().await;
 
         info!("replication connection shut down");
         Ok(())
