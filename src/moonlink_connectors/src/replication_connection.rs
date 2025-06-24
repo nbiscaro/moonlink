@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio_postgres::{connect, Client, Config, NoTls};
+use tokio_postgres::{connect, tls, Client, Config, Connection, NoTls, Socket};
 use tracing::Instrument;
 use tracing::{debug, error, info, info_span, warn};
 
@@ -235,8 +235,19 @@ impl ReplicationConnection {
             }
         };
 
+        let (_, connection) = match connect(&self.uri, NoTls).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                error!(error = ?e, "failed to connect");
+                return tokio::spawn(
+                    async { Err(PostgresSourceError::from(e).into()) }
+                        .instrument(info_span!("replication_task_error")),
+                );
+            }
+        };
+
         tokio::spawn(
-            async move { run_event_loop(stream, sink, cmd_rx).await }
+            async move { run_event_loop(stream, connection, sink, cmd_rx).await }
                 .instrument(info_span!("replication_event_loop")),
         )
     }
@@ -376,10 +387,12 @@ impl ReplicationConnection {
 #[tracing::instrument(name = "replication_event_loop", skip_all)]
 async fn run_event_loop(
     stream: CdcStream,
+    connection: Connection<Socket, tls::NoTlsStream>,
     mut sink: Sink,
     mut cmd_rx: mpsc::Receiver<Command>,
 ) -> Result<()> {
     pin!(stream);
+    pin!(connection);
 
     debug!("replication event loop started");
 
@@ -388,30 +401,32 @@ async fn run_event_loop(
 
     loop {
         tokio::select! {
-                        _ = status_interval.tick() => {
-                            if let Err(e) = stream
-                                .as_mut()
-                                .send_status_update(last_lsn)
-                                .await
-                            {
-                                error!(error = ?e, "failed to send status update");
-                            }
-                        },
-                        Some(cmd) = cmd_rx.recv() => match cmd {
-                            Command::AddTable { table_id, schema, event_sender, commit_lsn_tx } => {
-                                sink.add_table(table_id, event_sender, commit_lsn_tx);
-                                stream.as_mut().add_table_schema(schema);
-                            }
-                            Command::DropTable { table_id } => {
-                                sink.drop_table(table_id);
-                                stream.as_mut().remove_table_schema(table_id);
-                            }
-                            Command::Shutdown => {
-                                info!("received shutdown command");
-                                break;
-                            }
-                        },
-                        event = StreamExt::next(&mut stream) => {
+            res = &mut connection => {
+                if let Err(e) = res {
+                    error!(error = ?e, "postgres connection error");
+                }
+                break;
+            }
+            _ = status_interval.tick() => {
+                if let Err(e) = stream.as_mut().send_status_update(last_lsn).await {
+                    error!(error = ?e, "failed to send status update");
+                }
+            }
+            Some(cmd) = cmd_rx.recv() => match cmd {
+                Command::AddTable { table_id, schema, event_sender, commit_lsn_tx } => {
+                    sink.add_table(table_id, event_sender, commit_lsn_tx);
+                    stream.as_mut().add_table_schema(schema);
+                }
+                Command::DropTable { table_id } => {
+                    sink.drop_table(table_id);
+                    stream.as_mut().remove_table_schema(table_id);
+                }
+                Command::Shutdown => {
+                    info!("received shutdown command");
+                    break;
+                }
+            },
+            event = StreamExt::next(&mut stream) => {
                 let Some(event_result) = event else {
                     error!("replication stream ended unexpectedly");
                     break;
