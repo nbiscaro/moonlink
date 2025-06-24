@@ -5,7 +5,7 @@ use moonlink::{IcebergTableEventManager, ObjectStorageCache, ReadStateManager};
 use std::collections::HashMap;
 use std::hash::Hash;
 use tokio::task::JoinHandle;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Manage replication sources keyed by their connection URI.
 ///
@@ -96,7 +96,7 @@ impl<T: Eq + Hash> ReplicationManager<T> {
         let (table_uri, table_id) = match self.table_info.get(&external_table_id) {
             Some(info) => info.clone(),
             None => {
-                info!("attempted to drop table that is not tracked by moonlink - table may already be dropped");
+                warn!("attempted to drop table that is not tracked by moonlink - table may already be dropped");
                 return Ok(());
             }
         };

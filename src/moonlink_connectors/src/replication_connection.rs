@@ -193,6 +193,7 @@ impl ReplicationConnection {
             .await
             .or_else(|e| match e.code() {
                 Some(&SqlState::LOCK_NOT_AVAILABLE) => {
+                    warn!("lock not available, retrying");
                     // Store the handle so we can track its completion
                     let handle = Self::retry_drop(&self.uri, drop_query);
                     self.retry_handles.push(handle);
