@@ -186,8 +186,10 @@ impl ReplicationConnection {
         // Clean up any completed retry handles first
         self.cleanup_completed_retries();
 
+        let timed_drop_query = format!("SET LOCAL lock_timeout = '100ms'; {}", drop_query);
+
         self.postgres_client
-            .simple_query(drop_query)
+            .simple_query(&timed_drop_query)
             .await
             .or_else(|e| match e.code() {
                 Some(&SqlState::LOCK_NOT_AVAILABLE) => {
