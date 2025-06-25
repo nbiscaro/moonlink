@@ -10,7 +10,7 @@ use tokio_postgres::{
     types::{Kind, PgLsn, Type},
     Client as PostgresClient, Config, CopyOutStream, NoTls, SimpleQueryMessage, SimpleQueryRow,
 };
-use tokio_postgres::{tls::NoTlsStream, Socket};
+use tokio_postgres::{tls::NoTlsStream, Connection, Socket};
 use tracing::Instrument;
 use tracing::{info, info_span, warn};
 
@@ -61,13 +61,7 @@ impl ReplicationClient {
     /// Connect to a postgres database in logical replication mode without TLS
     pub async fn connect_no_tls(
         uri: &str,
-    ) -> Result<
-        (
-            ReplicationClient,
-            tokio_postgres::Connection<Socket, NoTlsStream>,
-        ),
-        ReplicationClientError,
-    > {
+    ) -> Result<(ReplicationClient, Connection<Socket, NoTlsStream>), ReplicationClientError> {
         info!("connecting to postgres");
 
         let mut config = uri.parse::<Config>()?;

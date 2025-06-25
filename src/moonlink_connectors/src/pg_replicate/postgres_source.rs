@@ -9,8 +9,8 @@ use futures::{ready, Stream};
 use pin_project_lite::pin_project;
 use postgres_replication::LogicalReplicationStream;
 use thiserror::Error;
-use tokio_postgres::{types::PgLsn, CopyOutStream};
-use tracing::{debug, error, info};
+use tokio_postgres::{tls::NoTlsStream, types::PgLsn, Connection, CopyOutStream, Socket};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::pg_replicate::{
     clients::postgres::{ReplicationClient, ReplicationClientError},
@@ -56,13 +56,25 @@ pub struct PostgresSource {
     uri: String,
 }
 
+/// Configuration needed to create a CDC stream
+#[derive(Clone, Debug)]
+pub struct CdcStreamConfig {
+    pub publication: String,
+    pub slot_name: String,
+    pub confirmed_flush_lsn: PgLsn,
+    pub table_schemas: HashMap<TableId, TableSchema>,
+}
+
 impl PostgresSource {
     pub async fn new(
         uri: &str,
         slot_name: Option<String>,
         table_names_from: TableNamesFrom,
     ) -> Result<PostgresSource, PostgresSourceError> {
-        let mut replication_client = ReplicationClient::connect_no_tls(uri).await?;
+        let (mut replication_client, connection) = ReplicationClient::connect_no_tls(uri).await?;
+        tokio::spawn(
+            Self::drive_connection(connection).instrument(info_span!("postgres_client_monitor")),
+        );
         replication_client.begin_readonly_transaction().await?;
         let mut confirmed_flush_lsn = PgLsn::from(0);
         if let Some(ref slot_name) = slot_name {
@@ -94,8 +106,10 @@ impl PostgresSource {
         self.slot_name.as_ref()
     }
 
-    pub fn confirmed_flush_lsn(&self) -> PgLsn {
-        self.confirmed_flush_lsn
+    async fn drive_connection(connection: Connection<Socket, NoTlsStream>) {
+        if let Err(e) = connection.await {
+            warn!("connection error: {}", e);
+        }
     }
 
     async fn get_table_names_and_publication(
@@ -130,7 +144,11 @@ impl PostgresSource {
         publication: Option<&str>,
     ) -> Result<TableSchema, PostgresSourceError> {
         // Open new connection to get table schema
-        let mut replication_client = ReplicationClient::connect_no_tls(&self.uri).await?;
+        let (mut replication_client, connection) =
+            ReplicationClient::connect_no_tls(&self.uri).await?;
+        tokio::spawn(
+            Self::drive_connection(connection).instrument(info_span!("postgres_client_monitor")),
+        );
         replication_client.begin_readonly_transaction().await?;
         let (schema, name) = TableName::parse_schema_name(table_name);
         let table_schema = replication_client
@@ -187,17 +205,38 @@ impl PostgresSource {
         Ok(())
     }
 
-    pub async fn get_cdc_stream(&self, start_lsn: PgLsn) -> Result<CdcStream, PostgresSourceError> {
-        info!("starting cdc stream at lsn {start_lsn}");
+    /// Extract the configuration needed to create a CDC stream
+    pub fn get_cdc_stream_config(&self) -> Result<CdcStreamConfig, PostgresSourceError> {
         let publication = self
             .publication()
-            .ok_or(PostgresSourceError::MissingPublication)?;
+            .ok_or(PostgresSourceError::MissingPublication)?
+            .clone();
         let slot_name = self
             .slot_name()
-            .ok_or(PostgresSourceError::MissingSlotName)?;
-        let stream = self
-            .replication_client
-            .get_logical_replication_stream(publication, slot_name, start_lsn)
+            .ok_or(PostgresSourceError::MissingSlotName)?
+            .clone();
+
+        Ok(CdcStreamConfig {
+            publication,
+            slot_name,
+            confirmed_flush_lsn: self.confirmed_flush_lsn,
+            table_schemas: self.table_schemas.clone(),
+        })
+    }
+
+    /// Create a CDC stream from a configuration and replication client
+    pub async fn create_cdc_stream(
+        mut replication_client: ReplicationClient,
+        config: CdcStreamConfig,
+    ) -> Result<CdcStream, PostgresSourceError> {
+        info!("creating cdc stream");
+
+        let stream = replication_client
+            .get_logical_replication_stream(
+                &config.publication,
+                &config.slot_name,
+                config.confirmed_flush_lsn,
+            )
             .await
             .map_err(PostgresSourceError::ReplicationClient)?;
 
@@ -206,7 +245,7 @@ impl PostgresSource {
 
         Ok(CdcStream {
             stream,
-            table_schemas: self.table_schemas.clone(),
+            table_schemas: config.table_schemas,
             postgres_epoch,
         })
     }
