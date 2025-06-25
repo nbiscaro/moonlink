@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::pg_replicate::conversions::text::TextFormatConverter;
+use crate::pg_replicate::table::{ColumnSchema, LookupKey, TableId, TableName, TableSchema};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use thiserror::Error;
@@ -8,11 +10,9 @@ use tokio_postgres::{
     types::{Kind, PgLsn, Type},
     Client as PostgresClient, Config, CopyOutStream, NoTls, SimpleQueryMessage, SimpleQueryRow,
 };
+use tokio_postgres::{tls::NoTlsStream, Socket};
 use tracing::Instrument;
 use tracing::{info, info_span, warn};
-
-use crate::pg_replicate::conversions::text::TextFormatConverter;
-use crate::pg_replicate::table::{ColumnSchema, LookupKey, TableId, TableName, TableSchema};
 
 pub struct SlotInfo {
     pub confirmed_flush_lsn: PgLsn,
@@ -59,29 +59,30 @@ pub enum ReplicationClientError {
 
 impl ReplicationClient {
     /// Connect to a postgres database in logical replication mode without TLS
-    pub async fn connect_no_tls(uri: &str) -> Result<ReplicationClient, ReplicationClientError> {
+    pub async fn connect_no_tls(
+        uri: &str,
+    ) -> Result<
+        (
+            ReplicationClient,
+            tokio_postgres::Connection<Socket, NoTlsStream>,
+        ),
+        ReplicationClientError,
+    > {
         info!("connecting to postgres");
 
         let mut config = uri.parse::<Config>()?;
         config.replication_mode(ReplicationMode::Logical);
         let (postgres_client, connection) = config.connect(NoTls).await?;
 
-        tokio::spawn(
-            async move {
-                info!("waiting for connection to terminate");
-                if let Err(e) = connection.await {
-                    warn!("connection error: {}", e);
-                }
-            }
-            .instrument(info_span!("postgres_client_monitor")),
-        );
-
         info!("successfully connected to postgres");
 
-        Ok(ReplicationClient {
-            postgres_client,
-            in_txn: false,
-        })
+        Ok((
+            ReplicationClient {
+                postgres_client,
+                in_txn: false,
+            },
+            connection,
+        ))
     }
 
     /// Starts a read-only trasaction with repeatable read isolation level
