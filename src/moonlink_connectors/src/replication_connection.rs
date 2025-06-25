@@ -450,7 +450,7 @@ async fn run_event_loop(
 
     // Create stream while driving connection
     let stream = tokio::select! {
-        s = PostgresSource::create_cdc_stream(client, cfg) => s.map_err(PostgresSourceError::from)?,
+        s = PostgresSource::create_cdc_stream(client, cfg) => s?,
         _ = &mut connection => {
             return Err(PostgresSourceError::Io(Error::new(ErrorKind::ConnectionAborted, "connection closed during setup")).into());
         }
