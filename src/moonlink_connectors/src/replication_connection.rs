@@ -1,5 +1,6 @@
 use crate::pg_replicate::clients::postgres::ReplicationClient;
 use crate::pg_replicate::conversions::cdc_event::CdcEventConversionError;
+use crate::pg_replicate::initial_copy::start_initial_copy;
 use crate::pg_replicate::moonlink_sink::Sink;
 use crate::pg_replicate::postgres_source::{
     CdcStreamConfig, CdcStreamError, PostgresSource, PostgresSourceError, TableNamesFrom,
@@ -37,6 +38,12 @@ pub enum Command {
     },
     DropTable {
         src_table_id: SrcTableId,
+    },
+    StartTableCopy {
+        table_id: SrcTableId,
+    },
+    FinishTableCopy {
+        table_id: SrcTableId,
     },
     Shutdown,
 }
@@ -306,7 +313,39 @@ impl ReplicationConnection {
             error!(error = ?e, "failed to enqueue AddTable command");
         }
 
-        debug!(src_table_id, "table added to replication");
+        // Notify the replication task we are starting a table copy and to begin buffering CDC events.
+        let cmd_tx = self.cmd_tx.clone();
+        if let Err(e) = cmd_tx.send(Command::StartTableCopy { table_id }).await {
+            error!(error = ?e, table_id, "failed to send StartTableCopy command");
+        }
+
+        // Create a dedicated source for the copy and register and snapshot the table.
+        let copy_source = PostgresSource::new(
+            &self.uri,
+            Some(self.slot_name.clone()),
+            TableNamesFrom::Vec(vec![schema.table_name.clone()]),
+        )
+        .await?;
+
+        let handle = start_initial_copy(
+            table_id,
+            schema.clone(),
+            copy_source,
+            table_resources.event_sender,
+        );
+
+        // Handle copy completion in background
+        if let Some(handle) = handle {
+            let cmd_tx = self.cmd_tx.clone();
+            tokio::spawn(async move {
+                let _ = handle.await;
+                if let Err(e) = cmd_tx.send(Command::FinishTableCopy { table_id }).await {
+                    error!(error = ?e, table_id, "failed to send FinishTableCopy command");
+                }
+            });
+        }
+
+        debug!(table_id, "table added to replication");
 
         Ok(moonlink_table_config)
     }
@@ -492,6 +531,16 @@ async fn run_event_loop(
                                 sink.drop_table(src_table_id);
                                 flush_lsn_rxs.remove(&src_table_id);
                                 stream.as_mut().remove_table_schema(src_table_id);
+                            }
+                            Command::StartTableCopy { table_id } => {
+                                if let Err(e) = sink.start_table_copy(table_id).await {
+                                    error!(error = ?e, table_id, "failed to start table copy");
+                                }
+                            }
+                            Command::FinishTableCopy { table_id } => {
+                                if let Err(e) = sink.finish_table_copy(table_id).await {
+                                    error!(error = ?e, table_id, "failed to finish table copy");
+                                }
                             }
                             Command::Shutdown => {
                                 info!("received shutdown command");
