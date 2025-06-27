@@ -6,6 +6,7 @@ use crate::{Error, Result};
 use more_asserts as ma;
 use std::collections::BTreeMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
 use tracing::Instrument;
@@ -54,6 +55,8 @@ pub struct TableHandler {
 pub struct IcebergEventSyncSender {
     /// Notifies when iceberg drop table completes.
     pub iceberg_drop_table_completion_tx: mpsc::Sender<Result<()>>,
+    /// Notifies when iceberg flush LSN advances.
+    pub flush_lsn_tx: watch::Sender<u64>,
 }
 
 impl TableHandler {
@@ -386,6 +389,7 @@ impl TableHandler {
                             match iceberg_snapshot_result {
                                 Ok(snapshot_res) => {
                                     let iceberg_flush_lsn = snapshot_res.flush_lsn;
+                                    let _ = iceberg_event_sync_sender.flush_lsn_tx.send(iceberg_flush_lsn);
                                     table.set_iceberg_snapshot_res(snapshot_res);
                                     iceberg_snapshot_result_consumed = false;
 
