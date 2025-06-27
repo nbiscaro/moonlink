@@ -25,7 +25,6 @@ pub struct Sink {
     streaming_transactions_state: HashMap<u32, TransactionState>,
     transaction_state: TransactionState,
     replication_state: Arc<ReplicationState>,
-    last_lsn: u64,
 }
 
 impl Sink {
@@ -39,7 +38,6 @@ impl Sink {
                 touched_tables: HashSet::new(),
             },
             replication_state,
-            last_lsn: 0,
         }
     }
 }
@@ -59,7 +57,7 @@ impl Sink {
         self.commit_lsn_txs.remove(&table_id).unwrap();
     }
 
-    pub async fn process_cdc_event(&mut self, event: CdcEvent) -> Result<PgLsn, Infallible> {
+    pub async fn process_cdc_event(&mut self, event: CdcEvent) -> Result<(), Infallible> {
         match event {
             CdcEvent::Begin(begin_body) => {
                 debug!(final_lsn = begin_body.final_lsn(), "begin transaction");
@@ -92,7 +90,6 @@ impl Sink {
                 self.transaction_state.touched_tables.clear();
                 self.replication_state
                     .mark(PgLsn::from(commit_body.end_lsn()));
-                self.last_lsn = commit_body.end_lsn();
             }
             CdcEvent::StreamCommit(stream_commit_body) => {
                 let xact_id = stream_commit_body.xid();
@@ -125,7 +122,6 @@ impl Sink {
                 }
                 self.replication_state
                     .mark(PgLsn::from(stream_commit_body.end_lsn()));
-                self.last_lsn = stream_commit_body.end_lsn();
             }
             CdcEvent::Insert((table_id, table_row, xact_id)) => {
                 let event_sender = self.event_senders.get(&table_id).cloned();
@@ -237,7 +233,6 @@ impl Sink {
             CdcEvent::PrimaryKeepAlive(primary_keepalive_body) => {
                 self.replication_state
                     .mark(PgLsn::from(primary_keepalive_body.wal_end()));
-                self.last_lsn = primary_keepalive_body.wal_end();
             }
             CdcEvent::StreamStop(_stream_stop_body) => {
                 debug!("Stream stop");
@@ -260,6 +255,6 @@ impl Sink {
                 self.streaming_transactions_state.remove(&xact_id);
             }
         }
-        Ok(PgLsn::from(self.last_lsn))
+        Ok(())
     }
 }
