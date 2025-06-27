@@ -1015,6 +1015,117 @@ async fn test_multiple_snapshot_requests() {
     assert_eq!(visited, [true, true]);
 }
 
+/// Test that flush_lsn correctly reflects LSN ordering for batch operations
+#[tokio::test]
+async fn test_flush_lsn_ordering() {
+    let temp_dir = tempdir().unwrap();
+    let mut env = TestEnvironment::new(temp_dir, MooncakeTableConfig::default()).await;
+
+    // Subscribe to flush_lsn updates
+    let mut flush_lsn_rx = env.iceberg_table_event_manager.subscribe_flush_lsn();
+
+    // Initial flush_lsn should be 0
+    assert_eq!(*flush_lsn_rx.borrow(), 0);
+
+    // Commit data at LSN 10
+    env.append_row(1, "Alice", 25, None).await;
+    env.commit(10).await;
+
+    // Request iceberg snapshot at LSN 10
+    let mut rx = env.iceberg_table_event_manager.initiate_snapshot(10).await;
+    rx.recv().await.unwrap().unwrap();
+
+    // Verify that flush_lsn was updated to 10
+    flush_lsn_rx.changed().await.unwrap();
+    assert_eq!(*flush_lsn_rx.borrow(), 10);
+
+    // Commit data at LSN 20
+    env.append_row(2, "Bob", 30, None).await;
+    env.commit(20).await;
+
+    // Request iceberg snapshot at LSN 20
+    let mut rx = env.iceberg_table_event_manager.initiate_snapshot(20).await;
+    rx.recv().await.unwrap().unwrap();
+
+    // Flush LSN should now be 20
+    flush_lsn_rx.changed().await.unwrap();
+    assert_eq!(*flush_lsn_rx.borrow(), 20);
+
+    env.shutdown().await;
+}
+
+/// Test flush_lsn with out-of-order LSN operations
+#[tokio::test]
+async fn test_flush_lsn_out_of_order_lsn_operations() {
+    let temp_dir = tempdir().unwrap();
+    let mut env = TestEnvironment::new(temp_dir, MooncakeTableConfig::default()).await;
+
+    // Subscribe to flush_lsn updates
+    let mut flush_lsn_rx = env.iceberg_table_event_manager.subscribe_flush_lsn();
+
+    // Commit operations out of chronological order but in LSN order
+    env.append_row(1, "User1", 25, None).await;
+    env.commit(30).await;
+
+    env.append_row(2, "User2", 30, None).await;
+    env.commit(20).await; // Lower LSN after higher LSN
+
+    env.append_row(3, "User3", 35, None).await;
+    env.commit(40).await;
+
+    // Request snapshot at LSN 40 (should include all committed data)
+    let mut rx = env.iceberg_table_event_manager.initiate_snapshot(40).await;
+    rx.recv().await.unwrap().unwrap();
+
+    // Verify flush_lsn reflects the snapshot LSN
+    flush_lsn_rx.changed().await.unwrap();
+    let flush_lsn = *flush_lsn_rx.borrow();
+
+    // The flush_lsn should be the snapshot LSN which includes all committed data
+    assert_eq!(flush_lsn, 40);
+
+    env.shutdown().await;
+}
+
+/// Test flush_lsn consistency across multiple snapshots
+#[tokio::test]
+async fn test_flush_lsn_consistency_across_snapshots() {
+    let temp_dir = tempdir().unwrap();
+    let mut env = TestEnvironment::new(temp_dir, MooncakeTableConfig::default()).await;
+
+    // Subscribe to flush_lsn updates
+    let mut flush_lsn_rx = env.iceberg_table_event_manager.subscribe_flush_lsn();
+
+    // Create multiple snapshots and verify flush_lsn consistency
+    let test_lsns = vec![10, 20, 30, 40, 50];
+
+    for lsn in test_lsns {
+        // Add data and commit
+        env.append_row(lsn as i32, &format!("User{}", lsn), 25, None)
+            .await;
+        env.commit(lsn).await;
+
+        // Create snapshot
+        let mut rx = env.iceberg_table_event_manager.initiate_snapshot(lsn).await;
+        rx.recv().await.unwrap().unwrap();
+
+        // Verify flush_lsn matches expected LSN
+        flush_lsn_rx.changed().await.unwrap();
+        assert_eq!(*flush_lsn_rx.borrow(), lsn);
+
+        // Verify persistence by loading from iceberg
+        let mut iceberg_table_manager =
+            env.create_iceberg_table_manager(MooncakeTableConfig::default());
+        let (_, snapshot) = iceberg_table_manager
+            .load_snapshot_from_table()
+            .await
+            .unwrap();
+        assert_eq!(snapshot.data_file_flush_lsn, Some(lsn));
+    }
+
+    env.shutdown().await;
+}
+
 /// ---- Mock unit test ----
 #[tokio::test]
 async fn test_iceberg_snapshot_failure_mock_test() {
