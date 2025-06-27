@@ -92,11 +92,14 @@ impl TestEnvironment {
         ));
 
         let (iceberg_drop_table_completion_tx, iceberg_drop_table_completion_rx) = mpsc::channel(1);
+        let (flush_lsn_tx, flush_lsn_rx) = watch::channel(0u64);
         let iceberg_event_sync_sender = IcebergEventSyncSender {
             iceberg_drop_table_completion_tx,
+            flush_lsn_tx,
         };
         let iceberg_event_sync_receiver = IcebergEventSyncReceiver {
             iceberg_drop_table_completion_rx,
+            flush_lsn_rx,
         };
         let handler = TableHandler::new(mooncake_table, iceberg_event_sync_sender).await;
         let iceberg_table_event_manager =
