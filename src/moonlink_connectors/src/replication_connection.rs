@@ -33,6 +33,7 @@ pub enum Command {
         schema: TableSchema,
         event_sender: mpsc::Sender<TableEvent>,
         commit_lsn_tx: watch::Sender<u64>,
+        flush_lsn_rx: watch::Receiver<u64>,
     },
     DropTable {
         table_id: TableId,
@@ -305,6 +306,7 @@ impl ReplicationConnection {
                 schema: schema.clone(),
                 event_sender: resources.event_sender,
                 commit_lsn_tx: resources.commit_lsn_tx,
+                flush_lsn_rx: resources.flush_lsn_rx,
             })
             .await
         {
@@ -463,26 +465,37 @@ async fn run_event_loop(
     debug!("replication event loop started");
 
     let mut status_interval = tokio::time::interval(Duration::from_secs(10));
-    let mut last_lsn = PgLsn::from(0);
+    let mut flush_lsn_rxs: HashMap<TableId, watch::Receiver<u64>> = HashMap::new();
 
     loop {
         tokio::select! {
                         _ = status_interval.tick() => {
+                            let mut confirmed_lsn: Option<u64> = None;
+                            for rx in flush_lsn_rxs.values() {
+                                let lsn = *rx.borrow();
+                                confirmed_lsn = Some(match confirmed_lsn {
+                                    Some(v) => v.min(lsn),
+                                    None => lsn,
+                                });
+                            }
+                            let lsn_to_send = confirmed_lsn.map(PgLsn::from).unwrap_or(PgLsn::from(0));
                             if let Err(e) = stream
                                 .as_mut()
-                                .send_status_update(last_lsn)
+                                .send_status_update(lsn_to_send)
                                 .await
                             {
                                 error!(error = ?e, "failed to send status update");
                             }
                         },
                         Some(cmd) = cmd_rx.recv() => match cmd {
-                            Command::AddTable { table_id, schema, event_sender, commit_lsn_tx } => {
+                            Command::AddTable { table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx } => {
                                 sink.add_table(table_id, event_sender, commit_lsn_tx);
+                                flush_lsn_rxs.insert(table_id, flush_lsn_rx);
                                 stream.as_mut().add_table_schema(schema);
                             }
                             Command::DropTable { table_id } => {
                                 sink.drop_table(table_id);
+                                flush_lsn_rxs.remove(&table_id);
                                 stream.as_mut().remove_table_schema(table_id);
                             }
                             Command::Shutdown => {
@@ -506,7 +519,7 @@ async fn run_event_loop(
                         break;
                     }
                     Ok(event) => {
-                        last_lsn = sink.process_cdc_event(event).await.unwrap();
+                        sink.process_cdc_event(event).await.unwrap();
                     }
                 }
             }
