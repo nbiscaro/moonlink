@@ -8,8 +8,7 @@ use moonlink::{
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::sync::{mpsc::Sender, watch};
+use tokio::sync::{mpsc, mpsc::Sender, watch};
 
 /// Components required to replicate a single table.
 /// Components that the [`Sink`] needs for processing CDC events.
@@ -23,16 +22,20 @@ pub struct TableResources {
     pub read_state_manager: ReadStateManager,
     pub iceberg_table_event_manager: IcebergTableEventManager,
     pub commit_lsn_tx: watch::Sender<u64>,
+    pub flush_lsn_rx: watch::Receiver<u64>,
 }
 
 /// Create iceberg table event manager sender and receiver.
 fn create_iceberg_event_syncer() -> (IcebergEventSyncSender, IcebergEventSyncReceiver) {
     let (iceberg_drop_table_completion_tx, iceberg_drop_table_completion_rx) = mpsc::channel(1);
+    let (flush_lsn_tx, flush_lsn_rx) = watch::channel(0u64);
     let iceberg_event_sync_sender = IcebergEventSyncSender {
         iceberg_drop_table_completion_tx,
+        flush_lsn_tx,
     };
     let iceberg_event_sync_receiver = IcebergEventSyncReceiver {
         iceberg_drop_table_completion_rx,
+        flush_lsn_rx,
     };
     (iceberg_event_sync_sender, iceberg_event_sync_receiver)
 }
@@ -72,6 +75,7 @@ pub async fn build_table_components(
         ReadStateManager::new(&table, replication_state.subscribe(), commit_lsn_rx);
     let (iceberg_event_sync_sender, iceberg_event_sync_receiver) = create_iceberg_event_syncer();
     let handler = TableHandler::new(table, iceberg_event_sync_sender).await;
+    let flush_lsn_rx = iceberg_event_sync_receiver.flush_lsn_rx.clone();
     let iceberg_table_event_manager =
         IcebergTableEventManager::new(handler.get_event_sender(), iceberg_event_sync_receiver);
     let event_sender = handler.get_event_sender();
@@ -81,5 +85,6 @@ pub async fn build_table_components(
         read_state_manager,
         iceberg_table_event_manager,
         commit_lsn_tx,
+        flush_lsn_rx,
     })
 }
