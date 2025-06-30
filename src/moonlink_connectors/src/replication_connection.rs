@@ -503,6 +503,11 @@ async fn run_event_loop(
                         warn!("missing schema for replication event");
                         continue;
                     }
+                    Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MessageNotSupported)) => {
+                        // TODO: Add support for Truncate and Origin messages and remove this.
+                        warn!("message not supported");
+                        continue;
+                    }
                     Err(e) => {
                         error!(error = ?e, "cdc stream error");
                         break;
