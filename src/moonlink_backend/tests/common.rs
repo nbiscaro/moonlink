@@ -11,25 +11,43 @@ use moonlink_backend::{
     recreate_directory, MoonlinkBackend, ReadState, DEFAULT_MOONLINK_TEMP_FILE_PATH,
 };
 
+pub const METADATA_STORE_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
+/// Database schema for moonlink.
+pub const MOONLINK_SCHEMA: &str = "mooncake";
+/// SQL statements to create metadata storage table.
+const CREATE_TABLE_SCHEMA_SQL: &str =
+    include_str!("../../moonlink_metadata_store/src/postgres/sql/create_tables.sql");
+
+pub type DatabaseId = u32;
+pub type TableId = u64;
+pub const TABLE_ID: TableId = 0;
+
 pub const SRC_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
 pub const DST_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
 
-type DatabaseId = u64;
-type TableId = u64;
-pub const DATABASE_ID: DatabaseId = 0;
-pub const TABLE_ID: TableId = 0;
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TestGuardMode {
+    /// Default test mode, which initiates all resource at construction and clean up at destruction.
+    Normal,
+    /// For crash mode, drop does nothing.
+    Crash,
+}
 
 pub struct TestGuard {
     backend: Arc<MoonlinkBackend<DatabaseId, TableId>>,
     tmp: Option<TempDir>,
+    pub database_id: DatabaseId,
+    test_mode: TestGuardMode,
 }
 
 impl TestGuard {
     pub async fn new(table_name: Option<&'static str>) -> (Self, Client) {
-        let (tmp, backend, client) = setup_backend(table_name).await;
+        let (tmp, backend, client, database_id) = setup_backend(table_name).await;
         let guard = Self {
             backend: Arc::new(backend),
             tmp: Some(tmp),
+            database_id,
+            test_mode: TestGuardMode::Normal,
         };
         (guard, client)
     }
@@ -42,23 +60,51 @@ impl TestGuard {
     pub fn tmp(&self) -> Option<&TempDir> {
         self.tmp.as_ref()
     }
+
+    /// Set test guard mode.
+    pub fn set_test_mode(&mut self, mode: TestGuardMode) {
+        self.test_mode = mode;
+    }
+
+    /// Take the ownership of testing directory.
+    pub fn take_test_directory(&mut self) -> TempDir {
+        assert!(self.tmp.is_some());
+        self.tmp.take().unwrap()
+    }
 }
 
 impl Drop for TestGuard {
     fn drop(&mut self) {
+        if self.test_mode == TestGuardMode::Crash {
+            return;
+        }
+
         // move everything we need into the async block
         let backend = Arc::clone(&self.backend);
         let tmp = self.tmp.take();
+        let database_id = self.database_id;
 
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async move {
-                let _ = backend.drop_table(DATABASE_ID, TABLE_ID).await;
+                let _ = backend.drop_table(database_id, TABLE_ID).await;
                 let _ = backend.shutdown_connection(SRC_URI).await;
                 let _ = recreate_directory(DEFAULT_MOONLINK_TEMP_FILE_PATH);
                 drop(tmp);
             });
         });
     }
+}
+
+/// Get current database id.
+async fn get_current_database_id(client: &Client) -> u32 {
+    let row = client
+        .query_one(
+            "SELECT oid FROM pg_database WHERE datname = current_database()",
+            &[],
+        )
+        .await
+        .unwrap();
+    row.get(0)
 }
 
 /// Return the current WAL LSN as a simple `u64`.
@@ -194,7 +240,12 @@ fn apply_position_deletes_to_files(
 /// Moonlink.
 async fn setup_backend(
     table_name: Option<&'static str>,
-) -> (TempDir, MoonlinkBackend<DatabaseId, TableId>, Client) {
+) -> (
+    TempDir,
+    MoonlinkBackend<DatabaseId, TableId>,
+    Client,
+    DatabaseId,
+) {
     let temp_dir = TempDir::new().unwrap();
     let backend =
         MoonlinkBackend::<DatabaseId, TableId>::new(temp_dir.path().to_str().unwrap().into());
@@ -204,6 +255,8 @@ async fn setup_backend(
     tokio::spawn(async move {
         let _ = connection.await;
     });
+
+    let database_id = get_current_database_id(&client).await;
 
     // Clear any leftover replication slot from previous runs.
     let _ = client
@@ -227,9 +280,17 @@ async fn setup_backend(
             ))
             .await
             .unwrap();
+        client
+            .simple_query("CREATE SCHEMA IF NOT EXISTS mooncake")
+            .await
+            .unwrap();
+        client
+            .simple_query("DROP TABLE IF EXISTS mooncake.tables")
+            .await
+            .unwrap();
         backend
             .create_table(
-                DATABASE_ID,
+                database_id,
                 TABLE_ID,
                 DST_URI.to_string(),
                 format!("public.{table_name}"),
@@ -239,7 +300,7 @@ async fn setup_backend(
             .unwrap();
     }
 
-    (temp_dir, backend, client)
+    (temp_dir, backend, client, database_id)
 }
 
 /// Reusable helper for the "create table / insert rows / detect change"
@@ -248,6 +309,7 @@ async fn setup_backend(
 pub async fn smoke_create_and_insert(
     backend: &MoonlinkBackend<DatabaseId, TableId>,
     client: &Client,
+    database_id: DatabaseId,
     uri: &str,
 ) {
     client
@@ -257,10 +319,15 @@ pub async fn smoke_create_and_insert(
         )
         .await
         .unwrap();
+    client
+        .simple_query("DROP TABLE IF EXISTS mooncake.tables;")
+        .await
+        .unwrap();
+    client.simple_query(CREATE_TABLE_SCHEMA_SQL).await.unwrap();
 
     backend
         .create_table(
-            DATABASE_ID,
+            database_id,
             TABLE_ID,
             DST_URI.to_string(),
             "public.test".to_string(),
@@ -276,12 +343,12 @@ pub async fn smoke_create_and_insert(
         .unwrap();
 
     let old = backend
-        .scan_table(DATABASE_ID, TABLE_ID, None)
+        .scan_table(database_id, TABLE_ID, None)
         .await
         .unwrap();
     let lsn = current_wal_lsn(client).await;
     let new = backend
-        .scan_table(DATABASE_ID, TABLE_ID, Some(lsn))
+        .scan_table(database_id, TABLE_ID, Some(lsn))
         .await
         .unwrap();
     assert_ne!(old.data, new.data);

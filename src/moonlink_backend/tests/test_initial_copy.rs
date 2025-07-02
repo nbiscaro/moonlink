@@ -3,8 +3,8 @@ mod common;
 #[cfg(test)]
 mod tests {
     use super::common::{
-        current_wal_lsn, ids_from_state, ids_from_state_with_deletes, TestGuard, DATABASE_ID,
-        DST_URI, SRC_URI, TABLE_ID,
+        current_wal_lsn, ids_from_state, ids_from_state_with_deletes, TestGuard, DST_URI, SRC_URI,
+        TABLE_ID,
     };
     use serial_test::serial;
     use std::collections::HashSet;
@@ -47,7 +47,7 @@ mod tests {
         // Register the table - this kicks off *initial copy* in the background
         backend
             .create_table(
-                DATABASE_ID,
+                guard.database_id,
                 TABLE_ID,
                 DST_URI.to_string(),
                 format!("public.{table_name}"),
@@ -69,7 +69,7 @@ mod tests {
 
         let ids = ids_from_state(
             &backend
-                .scan_table(DATABASE_ID, TABLE_ID, Some(lsn_after_insert))
+                .scan_table(guard.database_id, TABLE_ID, Some(lsn_after_insert))
                 .await
                 .unwrap(),
         );
@@ -84,7 +84,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let _ = backend.drop_table(DATABASE_ID, TABLE_ID).await;
+        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -127,7 +127,7 @@ mod tests {
         // Register the table - this kicks off *initial copy* in the background
         backend
             .create_table(
-                DATABASE_ID,
+                guard.database_id,
                 TABLE_ID,
                 DST_URI.to_string(),
                 format!("public.{table_name}"),
@@ -143,7 +143,7 @@ mod tests {
 
         let ids = ids_from_state(
             &backend
-                .scan_table(DATABASE_ID, TABLE_ID, Some(lsn_after_insert))
+                .scan_table(guard.database_id, TABLE_ID, Some(lsn_after_insert))
                 .await
                 .unwrap(),
         );
@@ -159,7 +159,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let _ = backend.drop_table(DATABASE_ID, TABLE_ID).await;
+        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -195,7 +195,7 @@ mod tests {
         tokio::spawn(async move {
             backend_clone
                 .create_table(
-                    DATABASE_ID,
+                    guard.database_id,
                     TABLE_ID,
                     DST_URI.to_string(),
                     format!("public.{table_name}"),
@@ -218,7 +218,7 @@ mod tests {
         let lsn = current_wal_lsn(&initial_client).await;
         let ids = ids_from_state(
             &backend
-                .scan_table(DATABASE_ID, TABLE_ID, Some(lsn))
+                .scan_table(guard.database_id, TABLE_ID, Some(lsn))
                 .await
                 .unwrap(),
         );
@@ -226,6 +226,7 @@ mod tests {
         let mut expected: HashSet<i64> = (1..=row_count).collect();
         expected.insert(row_count + 1); // inserted row
 
+        assert_eq!(ids.len(), expected.len());
         assert_eq!(ids, expected);
 
         initial_client
@@ -235,7 +236,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let _ = backend.drop_table(DATABASE_ID, TABLE_ID).await;
+        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -271,7 +272,7 @@ mod tests {
         let create_handle = tokio::spawn(async move {
             backend_clone
                 .create_table(
-                    DATABASE_ID,
+                    guard.database_id,
                     TABLE_ID,
                     DST_URI.to_string(),
                     format!("public.{table_name}"),
@@ -325,7 +326,7 @@ mod tests {
         let lsn = current_wal_lsn(&initial_client).await;
         let ids = ids_from_state(
             &backend
-                .scan_table(DATABASE_ID, TABLE_ID, Some(lsn))
+                .scan_table(guard.database_id, TABLE_ID, Some(lsn))
                 .await
                 .unwrap(),
         );
@@ -344,7 +345,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let _ = backend.drop_table(DATABASE_ID, TABLE_ID).await;
+        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -383,7 +384,7 @@ mod tests {
         let backend_clone = Arc::clone(&backend);
         backend_clone
             .create_table(
-                DATABASE_ID,
+                guard.database_id,
                 TABLE_ID,
                 DST_URI.to_string(),
                 format!("public.{table_name}"),
@@ -414,7 +415,7 @@ mod tests {
         let lsn = current_wal_lsn(&initial_client).await;
         let ids = ids_from_state_with_deletes(
             &backend
-                .scan_table(DATABASE_ID, TABLE_ID, Some(lsn))
+                .scan_table(guard.database_id, TABLE_ID, Some(lsn))
                 .await
                 .unwrap(),
         )
@@ -432,7 +433,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let _ = backend.drop_table(DATABASE_ID, TABLE_ID).await;
+        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -465,7 +466,7 @@ mod tests {
         let backend_clone = Arc::clone(&backend);
         backend_clone
             .create_table(
-                DATABASE_ID,
+                guard.database_id,
                 TABLE_ID,
                 DST_URI.to_string(),
                 format!("public.{table_name}"),
@@ -487,7 +488,7 @@ mod tests {
         let lsn = current_wal_lsn(&initial_client).await;
         let ids = ids_from_state_with_deletes(
             &backend
-                .scan_table(DATABASE_ID, TABLE_ID, Some(lsn))
+                .scan_table(guard.database_id, TABLE_ID, Some(lsn))
                 .await
                 .unwrap(),
         )
@@ -506,7 +507,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let _ = backend.drop_table(DATABASE_ID, TABLE_ID).await;
+        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
     }
 
     /// A kitchen-sink stress test that:
@@ -548,7 +549,7 @@ mod tests {
         let backend_clone = Arc::clone(&backend);
         backend_clone
             .create_table(
-                DATABASE_ID,
+                guard.database_id,
                 TABLE_ID,
                 DST_URI.to_string(),
                 format!("public.{table_name}"),
@@ -612,7 +613,7 @@ mod tests {
         let lsn = current_wal_lsn(&initial_client).await;
         let observed_ids = ids_from_state_with_deletes(
             &backend
-                .scan_table(DATABASE_ID, TABLE_ID, Some(lsn))
+                .scan_table(guard.database_id, TABLE_ID, Some(lsn))
                 .await
                 .unwrap(),
         )
@@ -654,6 +655,6 @@ mod tests {
             ))
             .await
             .unwrap();
-        let _ = backend.drop_table(DATABASE_ID, TABLE_ID).await;
+        let _ = backend.drop_table(guard.database_id, TABLE_ID).await;
     }
 }

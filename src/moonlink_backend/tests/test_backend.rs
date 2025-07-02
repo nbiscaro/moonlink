@@ -2,14 +2,19 @@ mod common;
 
 #[cfg(test)]
 mod tests {
+    use moonlink_metadata_store::{base_metadata_store::MetadataStoreTrait, PgMetadataStore};
     use tempfile::TempDir;
+    use tokio_postgres::{connect, NoTls};
 
-    use super::common::{current_wal_lsn, ids_from_state, smoke_create_and_insert, TestGuard};
+    use super::common::{
+        current_wal_lsn, ids_from_state, smoke_create_and_insert, DatabaseId, TableId, TestGuard,
+        TestGuardMode, METADATA_STORE_URI, MOONLINK_SCHEMA, TABLE_ID,
+    };
 
     use serial_test::serial;
     use std::collections::HashSet;
 
-    use moonlink_backend::recreate_directory;
+    use moonlink_backend::{recreate_directory, MoonlinkBackend};
 
     const SRC_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
     const DST_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
@@ -163,29 +168,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_replication_connection_cleanup() {
-        let (guard, client) = TestGuard::new("repl_test").await;
+        let (guard, client) = TestGuard::new(Some("repl_test")).await;
         let backend = guard.backend();
-
-        // Drop the table that setup_backend created so we can test the full cycle
-        backend.drop_table(guard.database_id, TABLE_ID).await;
-
-        // First cycle: add table, insert data, verify it works
-        backend
-            .create_table(
-                guard.database_id,
-                TABLE_ID,
-                DST_URI.to_string(),
-                "public.repl_test".to_string(),
-                SRC_URI.to_string(),
-            )
-            .await
-            .unwrap();
 
         client
             .simple_query("INSERT INTO repl_test VALUES (1,'first');")
             .await
             .unwrap();
-        let lsn = current_wal_lsn(&client).await;
 
         let lsn = current_wal_lsn(&client).await;
         let ids = ids_from_state(
@@ -197,6 +186,10 @@ mod tests {
         assert_eq!(ids, HashSet::from([1]));
 
         // Drop the table (this should clean up the replication connection)
+        client
+            .simple_query("DROP TABLE IF EXISTS repl_test;")
+            .await
+            .unwrap();
         backend.drop_table(guard.database_id, TABLE_ID).await;
 
         // Second cycle: add table again, insert different data, verify it works
@@ -219,7 +212,6 @@ mod tests {
             .simple_query("INSERT INTO repl_test VALUES (2,'second');")
             .await
             .unwrap();
-        let lsn = current_wal_lsn(&client).await;
 
         let lsn = current_wal_lsn(&client).await;
         let ids = ids_from_state(
@@ -267,7 +259,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_metadata_store() {
-        let (guard, _) = TestGuard::new("metadata_store").await;
+        let (guard, _) = TestGuard::new(Some("metadata_store")).await;
         // Till now, table [`metadata_store`] has been created at both row storage and column storage database.
         let backend = guard.backend();
         let metadata_store = PgMetadataStore::new(DST_URI).await.unwrap().unwrap();
@@ -329,7 +321,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_recovery() {
-        let (mut guard, client) = TestGuard::new("recovery").await;
+        let (mut guard, client) = TestGuard::new(Some("recovery")).await;
         guard.set_test_mode(TestGuardMode::Crash);
 
         let database_id = guard.database_id;

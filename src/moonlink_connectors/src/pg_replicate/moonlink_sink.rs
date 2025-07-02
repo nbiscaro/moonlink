@@ -59,7 +59,7 @@ impl Sink {
 
     pub async fn start_table_copy(
         &mut self,
-        table_id: TableId,
+        table_id: SrcTableId,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let sender = self
             .event_senders
@@ -81,7 +81,7 @@ impl Sink {
 
     pub async fn finish_table_copy(
         &mut self,
-        table_id: TableId,
+        table_id: SrcTableId,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let sender = self
             .event_senders

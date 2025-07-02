@@ -1,5 +1,5 @@
 use crate::pg_replicate::postgres_source::{PostgresSource, TableCopyStream};
-use crate::pg_replicate::table::{ColumnSchema, LookupKey, TableId, TableName, TableSchema};
+use crate::pg_replicate::table::{ColumnSchema, LookupKey, SrcTableId, TableName, TableSchema};
 use crate::pg_replicate::util::PostgresTableRow;
 use crate::Result;
 use futures::{pin_mut, Stream, StreamExt};
@@ -21,7 +21,7 @@ pub struct CopyProgress {
 /// Start the copy for `table_id` using `event_sender`
 /// to deliver the copied rows.
 pub fn start_initial_copy(
-    table_id: TableId,
+    table_id: SrcTableId,
     schema: TableSchema,
     source: PostgresSource,
     event_sender: Sender<TableEvent>,
@@ -125,7 +125,7 @@ mod tests {
                 schema: "public".to_string(),
                 name: name.to_string(),
             },
-            table_id: 1,
+            src_table_id: 1,
             column_schemas: vec![ColumnSchema {
                 name: "id".to_string(),
                 typ: Type::INT4,
