@@ -11,8 +11,10 @@ use moonlink_backend::{
     recreate_directory, MoonlinkBackend, ReadState, DEFAULT_MOONLINK_TEMP_FILE_PATH,
 };
 
+#[allow(dead_code)]
 pub const METADATA_STORE_URI: &str = "postgresql://postgres:postgres@postgres:5432/postgres";
 /// Database schema for moonlink.
+#[allow(dead_code)]
 pub const MOONLINK_SCHEMA: &str = "mooncake";
 /// SQL statements to create metadata storage table.
 const CREATE_TABLE_SCHEMA_SQL: &str =
@@ -62,11 +64,13 @@ impl TestGuard {
     }
 
     /// Set test guard mode.
+    #[allow(dead_code)]
     pub fn set_test_mode(&mut self, mode: TestGuardMode) {
         self.test_mode = mode;
     }
 
     /// Take the ownership of testing directory.
+    #[allow(dead_code)]
     pub fn take_test_directory(&mut self) -> TempDir {
         assert!(self.tmp.is_some());
         self.tmp.take().unwrap()

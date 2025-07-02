@@ -16,7 +16,7 @@ use more_asserts as ma;
 pub(super) struct TransactionStreamState {
     mem_slice: MemSlice,
     local_deletions: Vec<ProcessedDeletionRecord>,
-    buffered_deletions: Vec<(MoonlinkRow, u32)>,
+    buffered_deletions: Vec<RawDeletionRecord>,
     pending_deletions_in_main_mem_slice: Vec<RawDeletionRecord>,
     index_bloom_filter: BloomFilter,
     flushed_file_index: MooncakeIndex,
@@ -35,7 +35,7 @@ pub struct TransactionStreamCommit {
     flushed_files: hashbrown::HashMap<MooncakeDataFileRef, DiskFileEntry>,
     local_deletions: Vec<ProcessedDeletionRecord>,
     pending_deletions: Vec<RawDeletionRecord>,
-    buffered_deletions: Vec<(MoonlinkRow, u32)>,
+    buffered_deletions: Vec<RawDeletionRecord>,
 }
 
 impl TransactionStreamCommit {
@@ -134,11 +134,6 @@ impl MooncakeTable {
             &self.metadata,
             xact_id,
         );
-        if in_initial_copy {
-            stream_state.buffered_deletions.push((row, xact_id));
-            return;
-        }
-
         let lookup_key = self.metadata.identity.get_lookup_key(&row);
         let mut record = RawDeletionRecord {
             lookup_key,
@@ -146,6 +141,11 @@ impl MooncakeTable {
             pos: None,
             row_identity: self.metadata.identity.extract_identity_columns(row),
         };
+
+        if in_initial_copy {
+            stream_state.buffered_deletions.push(record);
+            return;
+        }
 
         // it is very unlikely to delete a row in current transaction,
         // only very weird query shape could do it.
@@ -299,8 +299,9 @@ impl MooncakeTable {
         let lsn = commit.commit_lsn;
         self.next_snapshot_task.new_commit_lsn = lsn;
         let buffered_deletions: Vec<_> = commit.buffered_deletions.drain(..).collect();
-        for (row, xact_id) in buffered_deletions {
-            self.delete_in_stream_batch(row, xact_id).await;
+        for mut deletion in buffered_deletions.into_iter() {
+            deletion.lsn = lsn - 1;
+            self.next_snapshot_task.new_deletions.push(deletion);
         }
         self.next_snapshot_task
             .new_streaming_xact
