@@ -292,6 +292,9 @@ impl MooncakeTable {
         }
     }
 
+    /// Commit a transaction stream commit.
+    /// This is used to commit a transaction stream commit that was buffered during initial copy.
+    /// It will be applied to the table at the end of initial copy.
     pub async fn commit_transaction_stream(
         &mut self,
         mut commit: TransactionStreamCommit,
