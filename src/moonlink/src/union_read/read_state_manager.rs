@@ -6,7 +6,6 @@ use crate::ReadState;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
-use tracing::debug;
 
 pub struct ReadStateManager {
     last_read_lsn: AtomicU64,
