@@ -595,19 +595,19 @@ mod tests {
             .unwrap();
 
         // (d) Aborted transaction (should have **zero** effect downstream).
-        // new_client
-        //     .simple_query(&format!(
-        //         "BEGIN;
-        //          INSERT INTO {table_name}
-        //          SELECT gs, 'rolled_back'
-        //          FROM generate_series({rb_start}, {rb_end}) AS gs;
-        //          ROLLBACK;",
-        //         table_name = table_name,
-        //         rb_start = row_count + 1000,
-        //         rb_end = row_count + 1100
-        //     ))
-        //     .await
-        //     .unwrap();
+        new_client
+            .simple_query(&format!(
+                "BEGIN;
+                 INSERT INTO {table_name}
+                 SELECT gs, 'rolled_back'
+                 FROM generate_series({rb_start}, {rb_end}) AS gs;
+                 ROLLBACK;",
+                table_name = table_name,
+                rb_start = row_count + 1000,
+                rb_end = row_count + 1100
+            ))
+            .await
+            .unwrap();
 
         // ===== 2. Final verification =====
         let lsn = current_wal_lsn(&initial_client).await;
