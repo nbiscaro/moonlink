@@ -128,12 +128,6 @@ impl MooncakeTable {
     }
 
     pub async fn delete_in_stream_batch(&mut self, row: MoonlinkRow, xact_id: u32) {
-        let in_initial_copy = self.is_in_initial_copy();
-        let stream_state = Self::get_or_create_stream_state(
-            &mut self.transaction_stream_states,
-            &self.metadata,
-            xact_id,
-        );
         let lookup_key = self.metadata.identity.get_lookup_key(&row);
         let mut record = RawDeletionRecord {
             lookup_key,
@@ -142,6 +136,12 @@ impl MooncakeTable {
             row_identity: self.metadata.identity.extract_identity_columns(row),
         };
 
+        let in_initial_copy = self.is_in_initial_copy();
+        let stream_state = Self::get_or_create_stream_state(
+            &mut self.transaction_stream_states,
+            &self.metadata,
+            xact_id,
+        );
         if in_initial_copy {
             stream_state.buffered_deletions.push(record);
             return;
