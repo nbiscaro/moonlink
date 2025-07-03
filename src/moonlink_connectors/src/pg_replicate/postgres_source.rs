@@ -10,7 +10,7 @@ use pin_project_lite::pin_project;
 use postgres_replication::LogicalReplicationStream;
 use thiserror::Error;
 use tokio_postgres::{tls::NoTlsStream, types::PgLsn, Connection, CopyOutStream, Socket};
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{debug, error, info_span, warn, Instrument};
 
 use crate::pg_replicate::{
     clients::postgres::{ReplicationClient, ReplicationClientError},
@@ -183,7 +183,7 @@ impl PostgresSource {
         table_name: &TableName,
         column_schemas: &[ColumnSchema],
     ) -> Result<TableCopyStream, PostgresSourceError> {
-        info!("starting table copy stream for table {table_name}");
+        debug!("starting table copy stream for table {table_name}");
 
         let stream = self
             .replication_client
@@ -229,7 +229,7 @@ impl PostgresSource {
         mut replication_client: ReplicationClient,
         config: CdcStreamConfig,
     ) -> Result<CdcStream, PostgresSourceError> {
-        info!("creating cdc stream");
+        debug!("creating cdc stream");
 
         let stream = replication_client
             .get_logical_replication_stream(

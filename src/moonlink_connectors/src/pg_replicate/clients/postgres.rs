@@ -12,7 +12,7 @@ use tokio_postgres::{
 };
 use tokio_postgres::{tls::NoTlsStream, Connection, Socket};
 use tracing::Instrument;
-use tracing::{info, info_span, warn};
+use tracing::{debug, info_span, warn};
 
 pub struct SlotInfo {
     pub confirmed_flush_lsn: PgLsn,
@@ -62,13 +62,13 @@ impl ReplicationClient {
     pub async fn connect_no_tls(
         uri: &str,
     ) -> Result<(ReplicationClient, Connection<Socket, NoTlsStream>), ReplicationClientError> {
-        info!("connecting to postgres");
+        debug!("connecting to postgres");
 
         let mut config = uri.parse::<Config>()?;
         config.replication_mode(ReplicationMode::Logical);
         let (postgres_client, connection) = config.connect(NoTls).await?;
 
-        info!("successfully connected to postgres");
+        debug!("successfully connected to postgres");
 
         Ok((
             ReplicationClient {

@@ -26,7 +26,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_postgres::{connect, Client, Config, NoTls};
 use tracing::Instrument;
-use tracing::{debug, error, info, info_span, warn};
+use tracing::{debug, error, info_span, warn};
 
 pub enum Command {
     AddTable {
@@ -76,7 +76,7 @@ impl ReplicationConnection {
         table_temp_files_directory: String,
         object_storage_cache: ObjectStorageCache,
     ) -> Result<Self> {
-        info!(%uri, "initializing replication connection");
+        debug!(%uri, "initializing replication connection");
 
         let (postgres_client, connection) = connect(&uri, NoTls)
             .await
@@ -116,7 +116,7 @@ impl ReplicationConnection {
 
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
 
-        info!("replication connection ready");
+        debug!("replication connection ready");
 
         Ok(Self {
             uri,
@@ -382,14 +382,14 @@ impl ReplicationConnection {
 
     /// Clean up iceberg table in a blocking manner.
     async fn drop_iceberg_table(&mut self, table_id: u32) -> Result<()> {
-        info!(table_id, "dropping iceberg table");
+        debug!(table_id, "dropping iceberg table");
         let mut table_state_manager = self.table_event_managers.remove(&table_id).unwrap();
         table_state_manager.drop_table().await?;
         Ok(())
     }
 
     pub async fn start_replication(&mut self) -> Result<()> {
-        info!("starting replication");
+        debug!("starting replication");
 
         let (tx, rx) = mpsc::channel(8);
         self.cmd_tx = tx;
@@ -401,7 +401,7 @@ impl ReplicationConnection {
 
         self.replication_started = true;
 
-        info!("replication started");
+        debug!("replication started");
 
         Ok(())
     }
@@ -413,7 +413,7 @@ impl ReplicationConnection {
         table_id: u32,
         override_table_base_path: Option<&str>,
     ) -> Result<(SrcTableId, MoonlinkTableConfig)> {
-        info!(table_name, "adding table");
+        debug!(table_name, "adding table");
         // TODO: We should not naively alter the replica identity of a table. We should only do this if we are sure that the table does not already have a FULL replica identity. [https://github.com/Mooncake-Labs/moonlink/issues/104]
         self.alter_table_replica_identity(table_name).await?;
         let table_schema = self.source.fetch_table_schema(table_name, None).await?;
@@ -429,14 +429,14 @@ impl ReplicationConnection {
 
         self.add_table_to_publication(table_name).await?;
 
-        info!(src_table_id = table_schema.src_table_id, "table added");
+        debug!(src_table_id = table_schema.src_table_id, "table added");
 
         Ok((table_schema.src_table_id, moonlink_table_config))
     }
 
     /// Remove the given table from connection.
     pub async fn drop_table(&mut self, src_table_id: u32) -> Result<()> {
-        info!(src_table_id, "dropping table");
+        debug!(src_table_id, "dropping table");
         let table_name = self.source.get_table_name_from_id(src_table_id);
 
         // Remove table from publication as the first step, to prevent further events.
@@ -444,7 +444,7 @@ impl ReplicationConnection {
         self.source.remove_table_schema(src_table_id);
         self.remove_table_from_replication(src_table_id).await?;
 
-        info!(src_table_id, "table dropped");
+        debug!(src_table_id, "table dropped");
         Ok(())
     }
 
@@ -455,7 +455,7 @@ impl ReplicationConnection {
     /// Wait for all pending retry operations to complete.
     async fn wait_for_pending_retries(&mut self) {
         if !self.retry_handles.is_empty() {
-            info!(
+            debug!(
                 "waiting for {} pending retry operations",
                 self.retry_handles.len()
             );
@@ -468,7 +468,7 @@ impl ReplicationConnection {
 
     pub fn shutdown(mut self) -> JoinHandle<Result<()>> {
         tokio::spawn(async move {
-            info!("shutting down replication connection");
+            debug!("shutting down replication connection");
             if self.replication_started {
                 if let Err(e) = self.cmd_tx.send(Command::Shutdown).await {
                     warn!(error = ?e, "failed to send shutdown command");
@@ -485,7 +485,7 @@ impl ReplicationConnection {
             // Wait for any pending retry operations to complete
             self.wait_for_pending_retries().await;
 
-            info!("replication connection shut down");
+            debug!("replication connection shut down");
             Ok(())
         })
     }
@@ -559,7 +559,7 @@ async fn run_event_loop(
                                 }
                             }
                             Command::Shutdown => {
-                                info!("received shutdown command");
+                                debug!("received shutdown command");
                                 break;
                             }
                         },
@@ -595,6 +595,6 @@ async fn run_event_loop(
         }
     }
 
-    info!("replication event loop stopped");
+    debug!("replication event loop stopped");
     Ok(())
 }

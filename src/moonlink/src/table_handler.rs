@@ -9,7 +9,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
 use tracing::Instrument;
-use tracing::{debug, error, info, info_span, warn};
+use tracing::{debug, error, info_span, warn};
 
 /// Handler for table operations
 pub struct TableHandler {
@@ -291,7 +291,7 @@ impl TableHandler {
                             if let Err(e) = table.shutdown().await {
                                 error!(error = %e, "failed to shutdown table");
                             }
-                            info!("shutting down table handler");
+                            debug!("shutting down table handler");
                             break;
                         }
                         // ==============================
@@ -472,7 +472,7 @@ impl TableHandler {
                     if let Err(e) = table.shutdown().await {
                         error!(error = %e, "failed to shutdown table");
                     }
-                    info!("all event senders dropped, shutting down table handler");
+                    debug!("all event senders dropped, shutting down table handler");
                     break;
                 }
             }

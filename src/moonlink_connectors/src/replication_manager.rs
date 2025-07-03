@@ -5,7 +5,7 @@ use moonlink::{MoonlinkTableConfig, ObjectStorageCache, ReadStateManager, TableE
 use std::collections::HashMap;
 use std::hash::Hash;
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// Manage replication sources keyed by their connection URI.
 ///
@@ -56,7 +56,7 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         table_name: &str,
         override_table_base_path: Option<&str>,
     ) -> Result<MoonlinkTableConfig> {
-        info!(%src_uri, table_name, "adding table through manager");
+        debug!(%src_uri, table_name, "adding table through manager");
         if !self.connections.contains_key(src_uri) {
             debug!(%src_uri, "creating replication connection");
             // Lazily create the directory that will hold all tables.
@@ -90,7 +90,7 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         self.table_info
             .insert(mooncake_table_id, (src_uri.to_string(), src_table_id));
 
-        info!(src_table_id, "table added through manager");
+        debug!(src_table_id, "table added through manager");
 
         Ok(moonlink_table_config)
     }
@@ -106,14 +106,14 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
                 return Ok(false);
             }
         };
-        info!(src_table_id, %table_uri, "dropping table through manager");
+        debug!(src_table_id, %table_uri, "dropping table through manager");
         let repl_conn = self.connections.get_mut(&table_uri).unwrap();
         repl_conn.drop_table(src_table_id).await?;
         if repl_conn.table_readers_count() == 0 {
             self.shutdown_connection(&table_uri);
         }
 
-        info!(src_table_id, "table dropped through manager");
+        debug!(src_table_id, "table dropped through manager");
         Ok(true)
     }
 
