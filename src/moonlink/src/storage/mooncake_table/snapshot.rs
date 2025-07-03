@@ -1057,7 +1057,10 @@ impl SnapshotTableState {
         // Assert and update flush LSN.
         if let Some(new_flush_lsn) = task.new_flush_lsn {
             // Assert flush LSN doesn't regress, if not force snapshot.
-            if self.current_snapshot.data_file_flush_lsn.is_some() && !opt.force_create {
+            if self.current_snapshot.data_file_flush_lsn.is_some()
+                && !opt.force_create
+                && new_flush_lsn != 0
+            {
                 ma::assert_lt!(
                     self.current_snapshot.data_file_flush_lsn.unwrap(),
                     new_flush_lsn
