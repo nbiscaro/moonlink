@@ -4,7 +4,7 @@ use moonlink_connectors::ReplicationManager;
 use moonlink_metadata_store::base_metadata_store::{MetadataStoreTrait, TableMetadataEntry};
 use moonlink_metadata_store::metadata_store_utils;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 /// Recovery the given table.
@@ -57,10 +57,11 @@ where
     T: std::convert::From<u32> + Eq + Hash + Clone + std::fmt::Display,
 {
     let mut recovered_metadata_stores: HashMap<D, Box<dyn MetadataStoreTrait>> = HashMap::new();
+    let mut unique_uris = HashSet::<String>::new();
 
     for cur_metadata_store_uri in metadata_store_uris.into_iter() {
         let metadata_store_accessor =
-            metadata_store_utils::create_metadata_store_accessor(cur_metadata_store_uri)?;
+            metadata_store_utils::create_metadata_store_accessor(cur_metadata_store_uri.clone())?;
 
         // Step-1: check schema existence, skip if not.
         if !metadata_store_accessor.schema_exists().await? {
@@ -89,6 +90,12 @@ where
 
         // Place into metadata store clients map.
         recovered_metadata_stores.insert(D::from(database_id), metadata_store_accessor);
+
+        unique_uris.insert(cur_metadata_store_uri);
+    }
+
+    for uri in unique_uris.into_iter() {
+        replication_manager.start_replication(&uri).await?;
     }
 
     Ok(recovered_metadata_stores)

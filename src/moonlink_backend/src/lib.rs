@@ -91,8 +91,8 @@ where
         let table_id = mooncake_table_id.get_table_id_value();
 
         // Add mooncake table to replication, and create corresponding mooncake table.
+        let mut manager = self.replication_manager.write().await;
         let moonlink_table_config = {
-            let mut manager = self.replication_manager.write().await;
             manager
                 .add_table(
                     &src_uri,
@@ -103,6 +103,7 @@ where
                 )
                 .await?
         };
+        manager.start_replication(&src_uri).await?;
 
         // Create metadata store entry.
         {
