@@ -81,8 +81,12 @@ impl ReplicationClient {
 
     /// Starts a read-only trasaction with repeatable read isolation level
     pub async fn begin_readonly_transaction(&mut self) -> Result<(), ReplicationClientError> {
+        // First, ensure any existing transaction is properly rolled back
+        self.rollback_txn().await?;
+
+        // Now start the new read-only transaction
         self.postgres_client
-            .simple_query("abort; begin read only isolation level repeatable read;")
+            .simple_query("begin read only isolation level repeatable read;")
             .await?;
         self.in_txn = true;
         Ok(())
