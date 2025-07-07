@@ -102,7 +102,7 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         let (table_uri, src_table_id) = match self.table_info.get(&mooncake_table_id) {
             Some(info) => info.clone(),
             None => {
-                warn!("attempted to drop table that is not tracked by moonlink - table may already be dropped");
+                debug!("attempted to drop table that is not tracked by moonlink - table may already be dropped");
                 return Ok(false);
             }
         };
