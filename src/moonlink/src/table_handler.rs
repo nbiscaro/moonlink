@@ -254,7 +254,7 @@ impl TableHandler {
                             }
 
                             // General non-streaming append.
-                            if !table.is_in_initial_copy() && xact_id.is_none() {
+                            if !table.is_in_initial_copy() && xact_id.is_none() && !is_copied {
                                 if let Err(e) = table.append(row) {
                                     warn!(error = %e, "failed to append row");
                                 }
