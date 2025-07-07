@@ -5,7 +5,7 @@ use moonlink::{MoonlinkTableConfig, ObjectStorageCache, ReadStateManager, TableE
 use std::collections::HashMap;
 use std::hash::Hash;
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Manage replication sources keyed by their connection URI.
 ///
