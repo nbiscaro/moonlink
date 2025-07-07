@@ -75,10 +75,6 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         }
         let replication_connection = self.connections.get_mut(src_uri).unwrap();
 
-        if !replication_connection.replication_started() {
-            replication_connection.start_replication().await?;
-        }
-
         let (src_table_id, moonlink_table_config) = replication_connection
             .add_table(
                 table_name,
@@ -93,6 +89,16 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         debug!(src_table_id, "table added through manager");
 
         Ok(moonlink_table_config)
+    }
+
+    pub async fn start_replication(&mut self, src_uri: &str) -> Result<()> {
+        assert!(self.connections.contains_key(src_uri));
+
+        let connection = self.connections.get_mut(src_uri).unwrap();
+        if !connection.replication_started() {
+            connection.start_replication().await?;
+        }
+        Ok(())
     }
 
     /// Drop table specified by the given table id.
