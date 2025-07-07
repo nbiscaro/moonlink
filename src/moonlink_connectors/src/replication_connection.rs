@@ -391,10 +391,6 @@ impl ReplicationConnection {
     pub async fn start_replication(&mut self) -> Result<()> {
         debug!("starting replication");
 
-        let (tx, rx) = mpsc::channel(8);
-        self.cmd_tx = tx;
-        self.cmd_rx = Some(rx);
-
         let sink = Sink::new(self.replication_state.clone());
         let receiver = self.cmd_rx.take().unwrap();
         self.handle = Some(self.spawn_replication_task(sink, receiver).await);
@@ -519,51 +515,51 @@ async fn run_event_loop(
 
     loop {
         tokio::select! {
-                        _ = status_interval.tick() => {
-                            let mut confirmed_lsn: Option<u64> = None;
-                            for rx in flush_lsn_rxs.values() {
-                                let lsn = *rx.borrow();
-                                confirmed_lsn = Some(match confirmed_lsn {
-                                    Some(v) => v.min(lsn),
-                                    None => lsn,
-                                });
-                            }
-                            let lsn_to_send = confirmed_lsn.map(PgLsn::from).unwrap_or(PgLsn::from(0));
-                            if let Err(e) = stream
-                                .as_mut()
-                                .send_status_update(lsn_to_send)
-                                .await
-                            {
-                                error!(error = ?e, "failed to send status update");
-                            }
-                        },
-                        Some(cmd) = cmd_rx.recv() => match cmd {
-                            Command::AddTable { src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx } => {
-                                sink.add_table(src_table_id, event_sender, commit_lsn_tx);
-                                flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
-                                stream.as_mut().add_table_schema(schema);
-                            }
-                            Command::DropTable { src_table_id } => {
-                                sink.drop_table(src_table_id);
-                                flush_lsn_rxs.remove(&src_table_id);
-                                stream.as_mut().remove_table_schema(src_table_id);
-                            }
-                            Command::StartTableCopy { table_id } => {
-                                if let Err(e) = sink.start_table_copy(table_id).await {
-                                    error!(error = ?e, table_id, "failed to start table copy");
-                                }
-                            }
-                            Command::FinishTableCopy { table_id } => {
-                                if let Err(e) = sink.finish_table_copy(table_id).await {
-                                    error!(error = ?e, table_id, "failed to finish table copy");
-                                }
-                            }
-                            Command::Shutdown => {
-                                debug!("received shutdown command");
-                                break;
-                            }
-                        },
-                        event = StreamExt::next(&mut stream) => {
+            _ = status_interval.tick() => {
+                let mut confirmed_lsn: Option<u64> = None;
+                for rx in flush_lsn_rxs.values() {
+                    let lsn = *rx.borrow();
+                    confirmed_lsn = Some(match confirmed_lsn {
+                        Some(v) => v.min(lsn),
+                        None => lsn,
+                    });
+                }
+                let lsn_to_send = confirmed_lsn.map(PgLsn::from).unwrap_or(PgLsn::from(0));
+                if let Err(e) = stream
+                    .as_mut()
+                    .send_status_update(lsn_to_send)
+                    .await
+                {
+                    error!(error = ?e, "failed to send status update");
+                }
+            },
+            Some(cmd) = cmd_rx.recv() => match cmd {
+                Command::AddTable { src_table_id, schema, event_sender, commit_lsn_tx, flush_lsn_rx } => {
+                    sink.add_table(src_table_id, event_sender, commit_lsn_tx);
+                    flush_lsn_rxs.insert(src_table_id, flush_lsn_rx);
+                    stream.as_mut().add_table_schema(schema);
+                }
+                Command::DropTable { src_table_id } => {
+                    sink.drop_table(src_table_id);
+                    flush_lsn_rxs.remove(&src_table_id);
+                    stream.as_mut().remove_table_schema(src_table_id);
+                }
+                Command::StartTableCopy { table_id } => {
+                    if let Err(e) = sink.start_table_copy(table_id).await {
+                        error!(error = ?e, table_id, "failed to start table copy");
+                    }
+                }
+                Command::FinishTableCopy { table_id } => {
+                    if let Err(e) = sink.finish_table_copy(table_id).await {
+                        error!(error = ?e, table_id, "failed to finish table copy");
+                    }
+                }
+                Command::Shutdown => {
+                    debug!("received shutdown command");
+                    break;
+                }
+            },
+            event = StreamExt::next(&mut stream) => {
                 let Some(event_result) = event else {
                     error!("replication stream ended unexpectedly");
                     break;
