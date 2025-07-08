@@ -55,9 +55,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{watch, RwLock};
 use tracing::info_span;
 use tracing::Instrument;
-use transaction_stream::{
-    TransactionStreamCommit, TransactionStreamOutput, TransactionStreamState,
-};
+use transaction_stream::{TransactionStreamOutput, TransactionStreamState};
 
 /// Special transaction id used for initial copy append operation.
 pub(crate) const INITIAL_COPY_XACT_ID: u32 = u32::MAX - 1;
@@ -492,8 +490,6 @@ pub struct MooncakeTable {
     /// will be buffered into a streaming transaction and committed once copy
     /// finishes.
     in_initial_copy: bool,
-    /// Commits while in copy mode. Applied when finalizing the initial copy.
-    initial_copy_buffered_commits: Vec<TransactionStreamCommit>,
 
     // Buffered events during initial copy.
     pub(crate) initial_copy_buffered_events: Vec<TableEvent>,
@@ -567,7 +563,6 @@ impl MooncakeTable {
             last_iceberg_snapshot_lsn,
             table_notify: None,
             in_initial_copy: false,
-            initial_copy_buffered_commits: Vec::new(),
             initial_copy_buffered_events: Vec::new(),
         })
     }
@@ -951,7 +946,7 @@ impl MooncakeTable {
     /// All commits are buffered and deferred until initial copy finishes.
     pub fn start_initial_copy(&mut self) {
         assert!(!self.in_initial_copy);
-        assert!(self.initial_copy_buffered_commits.is_empty());
+        assert!(self.initial_copy_buffered_events.is_empty());
         self.in_initial_copy = true;
     }
 
@@ -975,11 +970,6 @@ impl MooncakeTable {
 
     pub fn is_in_initial_copy(&self) -> bool {
         self.in_initial_copy
-    }
-
-    /// Buffer a commit seen during initial copy.
-    pub fn buffer_initial_copy_commit(&mut self, commit: TransactionStreamCommit) {
-        self.initial_copy_buffered_commits.push(commit);
     }
 
     /// Persist an iceberg snapshot.
