@@ -1,5 +1,5 @@
 use crate::storage::mooncake_table::SnapshotOption;
-use crate::storage::mooncake_table::{INITIAL_COPY_CDC_XACT_ID, INITIAL_COPY_XACT_ID};
+use crate::storage::mooncake_table::INITIAL_COPY_XACT_ID;
 use crate::storage::{io_utils, MooncakeTable};
 use crate::table_notify::TableEvent;
 use crate::{Error, Result};
@@ -9,7 +9,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
 use tracing::Instrument;
-use tracing::{debug, error, info_span, warn};
+use tracing::{debug, error, info_span};
 
 /// Handler for table operations
 pub struct TableHandler {
@@ -287,6 +287,10 @@ impl TableHandler {
                                 error!(error = %e, "failed to finish initial copy");
                             }
 
+                            // Commit copied rows that were added to main mem_slice first
+                            // Use LSN 0 for copied data to ensure it comes before CDC events
+                            table.commit(0);
+
                             // Force create the snapshot with LSN 0
                             assert!(table.create_snapshot(SnapshotOption {
                                 force_create: true,
@@ -295,6 +299,12 @@ impl TableHandler {
                                 skip_data_file_compaction: true,
                             }));
                             mooncake_snapshot_ongoing = true;
+
+                            // Apply the buffered events.
+                            let buffered_events = table.initial_copy_buffered_events.drain(..).collect::<Vec<_>>();
+                            for event in buffered_events {
+                                Self::process_cdc_table_event(event, &mut table, initial_persistence_lsn, &mut force_snapshot_lsns, &mut mooncake_snapshot_ongoing, &mut iceberg_snapshot_result_consumed, &mut iceberg_snapshot_ongoing, &mut maintainance_ongoing).await;
+                            }
                         }
                         // ==============================
                         // Table internal events
@@ -473,84 +483,99 @@ impl TableHandler {
                     return;
                 }
 
-                // General non-streaming append.
-                if !table.is_in_initial_copy() && xact_id.is_none() && !is_copied {
-                    if let Err(e) = table.append(row) {
-                        warn!(error = %e, "failed to append row");
+                if is_copied {
+                    if let Err(e) = table.append_in_stream_batch(row, INITIAL_COPY_XACT_ID) {
+                        error!(error = %e, "failed to append row");
                     }
                     return;
                 }
 
-                let xid = if is_copied {
-                    // For initial copy operations, leverage streaming write operation as well.
-                    INITIAL_COPY_XACT_ID
-                } else {
-                    // If mooncake is at initial copy state, buffer all cdc changes to stream batches, which get applied when initial copy finished.
-                    xact_id.unwrap_or(INITIAL_COPY_CDC_XACT_ID)
+                if table.is_in_initial_copy() {
+                    table.initial_copy_buffered_events.push(TableEvent::Append {
+                        is_copied,
+                        row,
+                        lsn,
+                        xact_id,
+                    });
+                    return;
+                }
+
+                let result = match xact_id {
+                    Some(xact_id) => {
+                        let res = table.append_in_stream_batch(row, xact_id);
+                        if table.should_transaction_flush(xact_id) {
+                            if let Err(e) = table.flush_transaction_stream(xact_id).await {
+                                error!(error = %e, "flush failed in append");
+                            }
+                        }
+                        res
+                    }
+                    None => table.append(row),
                 };
 
-                if let Err(e) = table.append_in_stream_batch(row, xid) {
-                    warn!(error = %e, "failed to append row in batch");
-                    return;
-                }
-
-                if table.should_transaction_flush(xid) {
-                    if let Err(e) = table.flush_transaction_stream(xid).await {
-                        warn!(error = %e, "flush failed in append");
-                    }
+                if let Err(e) = result {
+                    error!(error = %e, "failed to append row");
                 }
             }
             TableEvent::Delete { row, lsn, xact_id } => {
                 if Self::to_discard(lsn, initial_persistence_lsn) {
                     return;
                 }
-                if !table.is_in_initial_copy() && xact_id.is_none() {
-                    table.delete(row, lsn).await;
+
+                if table.is_in_initial_copy() {
+                    table.initial_copy_buffered_events.push(TableEvent::Delete {
+                        row,
+                        lsn,
+                        xact_id,
+                    });
                     return;
                 }
 
-                let xid = xact_id.unwrap_or(INITIAL_COPY_CDC_XACT_ID);
-                table.delete_in_stream_batch(row, xid).await;
+                match xact_id {
+                    Some(xact_id) => table.delete_in_stream_batch(row, xact_id).await,
+                    None => table.delete(row, lsn).await,
+                };
             }
             TableEvent::Commit { lsn, xact_id } => {
                 // Force create snapshot if
                 // 1. force snapshot is requested
                 // and 2. LSN which meets force snapshot requirement has appeared, before that we still allow buffering
                 // and 3. there's no snapshot creation operation ongoing
+                if table.is_in_initial_copy() {
+                    table
+                        .initial_copy_buffered_events
+                        .push(TableEvent::Commit { lsn, xact_id });
+                    return;
+                }
+
                 let force_snapshot = !force_snapshot_lsns.is_empty()
                     && lsn >= *force_snapshot_lsns.iter().next().as_ref().unwrap().0
                     && !*mooncake_snapshot_ongoing;
 
-                // Handle initial copy situation.
-                if table.is_in_initial_copy() {
-                    let xid = xact_id.unwrap_or(INITIAL_COPY_CDC_XACT_ID);
-                    let commit = table
-                        .prepare_transaction_stream_commit(xid, lsn)
-                        .await
-                        .unwrap();
-                    table.buffer_initial_copy_commit(commit);
-                }
-                // Handle streaming write situation.
-                else if let Some(xid) = xact_id {
-                    // Discard streaming write buffer, if content already persisted.
-                    if Self::to_discard(lsn, initial_persistence_lsn) {
-                        table.abort_in_stream_batch(xid);
-                        return;
+                match xact_id {
+                    Some(xact_id) => {
+                        // Discard streaming write buffer, if content already persisted.
+                        if Self::to_discard(lsn, initial_persistence_lsn) {
+                            table.abort_in_stream_batch(xact_id);
+                            return;
+                        }
+                        let commit = table
+                            .prepare_transaction_stream_commit(xact_id, lsn)
+                            .await
+                            .unwrap();
+                        if let Err(e) = table.commit_transaction_stream(commit).await {
+                            error!(error = %e, "stream commit flush failed");
+                        }
                     }
-                    let commit = table
-                        .prepare_transaction_stream_commit(xid, lsn)
-                        .await
-                        .unwrap();
-                    if let Err(e) = table.commit_transaction_stream(commit).await {
-                        error!(error = %e, "stream commit flush failed");
-                    }
-                }
-                // Handle non-streaming write situation.
-                else if !Self::to_discard(lsn, initial_persistence_lsn) {
-                    table.commit(lsn);
-                    if table.should_flush() || force_snapshot {
-                        if let Err(e) = table.flush(lsn).await {
-                            error!(error = %e, "flush failed in commit");
+                    None => {
+                        if Self::to_discard(lsn, initial_persistence_lsn) {
+                            return;
+                        }
+                        table.commit(lsn);
+                        if table.should_flush() || force_snapshot {
+                            if let Err(e) = table.flush(lsn).await {
+                                error!(error = %e, "flush failed in commit");
+                            }
                         }
                     }
                 }
@@ -577,13 +602,12 @@ impl TableHandler {
                     return;
                 }
                 if table.is_in_initial_copy() {
-                    if let Err(e) = table
-                        .flush_transaction_stream(INITIAL_COPY_CDC_XACT_ID)
-                        .await
-                    {
-                        error!(error = %e, "explicit flush failed");
-                    }
-                } else if let Err(e) = table.flush(lsn).await {
+                    table
+                        .initial_copy_buffered_events
+                        .push(TableEvent::Flush { lsn });
+                    return;
+                }
+                if let Err(e) = table.flush(lsn).await {
                     error!(error = %e, "explicit flush failed");
                 }
             }
