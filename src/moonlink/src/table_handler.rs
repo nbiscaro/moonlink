@@ -458,6 +458,7 @@ impl TableHandler {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn process_cdc_table_event(
         event: TableEvent,
         table: &mut MooncakeTable,
