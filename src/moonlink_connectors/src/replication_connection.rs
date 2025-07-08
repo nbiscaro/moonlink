@@ -90,6 +90,9 @@ impl ReplicationConnection {
             .instrument(info_span!("postgres_connection_monitor")),
         );
         postgres_client
+            .simple_query("SET lock_timeout = '1s';")
+            .await?;
+        postgres_client
             .simple_query(
                 "DROP PUBLICATION IF EXISTS moonlink_pub; CREATE PUBLICATION moonlink_pub WITH (publish_via_partition_root = true);",
             )
@@ -188,10 +191,8 @@ impl ReplicationConnection {
         // Clean up any completed retry handles first
         self.cleanup_completed_retries();
 
-        let timed_drop_query = format!("SET LOCAL lock_timeout = '100ms'; {}", drop_query);
-
         self.postgres_client
-            .simple_query(&timed_drop_query)
+            .simple_query(drop_query)
             .await
             .or_else(|e| match e.code() {
                 Some(&SqlState::LOCK_NOT_AVAILABLE) => {
