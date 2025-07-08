@@ -44,7 +44,6 @@ use arrow_schema::Schema;
 use delete_vector::BatchDeletionVector;
 pub(crate) use disk_slice::DiskSliceWriter;
 use mem_slice::MemSlice;
-use more_asserts as ma;
 pub(crate) use snapshot::{PuffinDeletionBlobAtRead, SnapshotTableState};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -60,8 +59,6 @@ use transaction_stream::{
     TransactionStreamCommit, TransactionStreamOutput, TransactionStreamState,
 };
 
-/// Special transaction id used when buffering CDC events during initial table copy.
-pub(crate) const INITIAL_COPY_CDC_XACT_ID: u32 = u32::MAX;
 /// Special transaction id used for initial copy append operation.
 pub(crate) const INITIAL_COPY_XACT_ID: u32 = u32::MAX - 1;
 
@@ -497,6 +494,9 @@ pub struct MooncakeTable {
     in_initial_copy: bool,
     /// Commits while in copy mode. Applied when finalizing the initial copy.
     initial_copy_buffered_commits: Vec<TransactionStreamCommit>,
+
+    // Buffered events during initial copy.
+    pub(crate) initial_copy_buffered_events: Vec<TableEvent>,
 }
 
 impl MooncakeTable {
@@ -568,6 +568,7 @@ impl MooncakeTable {
             table_notify: None,
             in_initial_copy: false,
             initial_copy_buffered_commits: Vec::new(),
+            initial_copy_buffered_events: Vec::new(),
         })
     }
 
@@ -976,22 +977,6 @@ impl MooncakeTable {
                 .await
                 .unwrap();
         }
-
-        let buffered_commits = self
-            .initial_copy_buffered_commits
-            .drain(..)
-            .collect::<Vec<_>>();
-
-        // Second: apply all buffered streaming transaction commits
-        //
-        // Used to check flush LSN doesn't regress.
-        let mut prev_flush_lsn = 0;
-        for commit in buffered_commits {
-            ma::assert_lt!(prev_flush_lsn, commit.get_commit_lsn());
-            prev_flush_lsn = commit.get_commit_lsn();
-            self.commit_transaction_stream(commit).await?;
-        }
-
         Ok(())
     }
 
