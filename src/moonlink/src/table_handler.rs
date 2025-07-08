@@ -559,11 +559,7 @@ impl TableHandler {
                             table.abort_in_stream_batch(xact_id);
                             return;
                         }
-                        let commit = table
-                            .prepare_transaction_stream_commit(xact_id, lsn)
-                            .await
-                            .unwrap();
-                        if let Err(e) = table.commit_transaction_stream(commit).await {
+                        if let Err(e) = table.commit_transaction_stream(xact_id, lsn).await {
                             error!(error = %e, "stream commit flush failed");
                         }
                     }

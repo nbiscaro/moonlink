@@ -966,14 +966,7 @@ impl MooncakeTable {
             .transaction_stream_states
             .contains_key(&INITIAL_COPY_XACT_ID)
         {
-            let initial_copy_stream_commit = self
-                .prepare_transaction_stream_commit(
-                    /*xact_id*/ INITIAL_COPY_XACT_ID,
-                    /*lsn=*/ 0,
-                )
-                .await
-                .unwrap();
-            self.commit_transaction_stream(initial_copy_stream_commit)
+            self.commit_transaction_stream(INITIAL_COPY_XACT_ID, 0)
                 .await
                 .unwrap();
         }
