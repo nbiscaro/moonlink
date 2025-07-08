@@ -90,7 +90,7 @@ impl ReplicationConnection {
             .instrument(info_span!("postgres_connection_monitor")),
         );
         postgres_client
-            .simple_query("SET lock_timeout = '1s';")
+            .simple_query("SET lock_timeout = '100ms';")
             .await?;
         postgres_client
             .simple_query(
