@@ -242,7 +242,8 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
             .map(|v| {
                 v.map(|n| match n {
                     PgNumeric::Value(bigdecimal) => {
-                        RowValue::Decimal(bigdecimal.to_i128().unwrap())
+                        let (int_val, _) = bigdecimal.into_bigint_and_exponent();
+                        RowValue::Decimal(int_val.to_i128().unwrap())
                     }
                     _ => RowValue::Null,
                 })
