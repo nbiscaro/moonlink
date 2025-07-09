@@ -84,8 +84,10 @@ impl ColumnArrayBuilder {
                     array_builder,
                 )
             }
-            DataType::Decimal128(_, _) => ColumnArrayBuilder::Decimal128(
-                PrimitiveBuilder::<Decimal128Type>::with_capacity(capacity),
+            DataType::Decimal128(precision, scale) => ColumnArrayBuilder::Decimal128(
+                PrimitiveBuilder::<Decimal128Type>::with_capacity(capacity)
+                    .with_precision_and_scale(*precision, *scale)
+                    .expect("Failed to create Decimal128Type"),
                 array_builder,
             ),
             DataType::Binary => ColumnArrayBuilder::Binary(
