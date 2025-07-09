@@ -23,7 +23,7 @@ fn numeric_precision_scale(modifier: i32) -> Option<(u8, i8)> {
     // Derived from: [https://github.com/postgres/postgres/blob/4fbb46f61271f4b7f46ecad3de608fc2f4d7d80f/src/backend/utils/adt/numeric.c#L929v]
     let precision = ((typmod >> 16) & 0xffff) as u8;
     // Derived from: [https://github.com/postgres/postgres/blob/4fbb46f61271f4b7f46ecad3de608fc2f4d7d80f/src/backend/utils/adt/numeric.c#L944]
-    let raw_scale = (typmod & 0x7fff);
+    let raw_scale = (typmod & 0x7ff);
     let scale = ((raw_scale ^ 1024) - 1024) as i8;
     Some((precision, scale))
 }
