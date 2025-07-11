@@ -568,7 +568,6 @@ async fn run_event_loop(
 
                 match event_result {
                     Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MissingSchema(_))) => {
-                        warn!("missing schema for replication event");
                         continue;
                     }
                     Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MessageNotSupported)) => {
