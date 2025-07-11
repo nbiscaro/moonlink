@@ -97,6 +97,8 @@ pub enum TableEvent {
     FlushResult {
         /// Result for mem slice flush.
         flush_result: Result<DiskSliceWriter>,
+        /// LSN of the flush.
+        lsn: u64,
     },
     /// Read request completion.
     ReadRequest {

@@ -701,7 +701,8 @@ impl MooncakeTable {
     }
 
     /// Set flush result, which will append the flushed disk slice into current task.
-    pub(crate) fn set_flush_result(&mut self, flush_result: Result<DiskSliceWriter>) {
+    pub(crate) fn set_flush_result(&mut self, flush_result: Result<DiskSliceWriter>, lsn: u64) {
+        self.next_snapshot_task.new_flush_lsn = Some(lsn);
         match flush_result {
             Ok(disk_slice) => {
                 self.next_snapshot_task.new_disk_slices.push(disk_slice);
@@ -831,8 +832,6 @@ impl MooncakeTable {
     // - tracks all record batches by current snapshot task
     // - persists all full batch records to local filesystem
     pub fn flush(&mut self, lsn: u64) -> Result<()> {
-        self.next_snapshot_task.new_flush_lsn = Some(lsn);
-
         if self.mem_slice.is_empty() {
             return Ok(());
         }
@@ -869,6 +868,7 @@ impl MooncakeTable {
                 table_notify_tx
                     .send(TableEvent::FlushResult {
                         flush_result: res.map(|_| disk_slice),
+                        lsn,
                     })
                     .await
                     .unwrap();

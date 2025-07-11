@@ -435,8 +435,8 @@ impl TableHandler {
                             }
                             maintainance_ongoing = false;
                         }
-                        TableEvent::FlushResult { flush_result } => {
-                            table.set_flush_result(flush_result);
+                        TableEvent::FlushResult { flush_result, lsn} => {
+                            table.set_flush_result(flush_result, lsn);
                         }
                         TableEvent::ReadRequest { cache_handles } => {
                             table.set_read_request_res(cache_handles);
