@@ -534,6 +534,7 @@ async fn test_drop_table_with_data() {
     .await;
     env.commit(/*lsn=*/ 1).await;
     env.flush_table(/*lsn=*/ 1).await;
+    env.snapshot_table(/*lsn=*/ Some(1)).await;
     env.set_readable_lsn(/*lsn=*/ 1);
 
     // Force mooncake and iceberg snapshot, and block wait until mooncake snapshot completion via getting a read state.
