@@ -407,7 +407,7 @@ impl TableHandler {
                             // Check whether a flush and force snapshot is needed.
                             if !table_handler_state.pending_force_snapshot_lsns.is_empty() {
                                 if let Some(commit_lsn) = table_handler_state.table_consistent_view_lsn {
-                                    table.flush(commit_lsn).await.unwrap();
+                                    table.flush(commit_lsn).unwrap();
                                     table_handler_state.reset_iceberg_state_at_mooncake_snapshot();
                                     assert!(table.create_snapshot(SnapshotOption {
                                         force_create: true,
@@ -525,6 +525,9 @@ impl TableHandler {
                             }
                             table_handler_state.maintainance_ongoing = false;
                         }
+                        TableEvent::FlushResult { flush_result, lsn} => {
+                            table.set_flush_result(flush_result, lsn);
+                        }
                         TableEvent::ReadRequest { cache_handles } => {
                             table.set_read_request_res(cache_handles);
                         }
@@ -636,7 +639,7 @@ impl TableHandler {
                     None => {
                         table.commit(lsn);
                         if table.should_flush() || force_snapshot {
-                            if let Err(e) = table.flush(lsn).await {
+                            if let Err(e) = table.flush(lsn) {
                                 error!(error = %e, "flush failed in commit");
                             }
                         }
@@ -658,7 +661,7 @@ impl TableHandler {
                 table.abort_in_stream_batch(xact_id);
             }
             TableEvent::Flush { lsn } => {
-                if let Err(e) = table.flush(lsn).await {
+                if let Err(e) = table.flush(lsn) {
                     error!(error = %e, "explicit flush failed");
                 }
             }
