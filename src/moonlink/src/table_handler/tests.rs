@@ -1705,7 +1705,8 @@ fn test_is_iceberg_snapshot_satisfy_force_snapshot() {
 
 #[test]
 fn test_can_initiate_iceberg_snapshot_pending_flush() {
-    let mut state = TableHandlerState::new();
+    let (index_merge_completion_tx, _) = broadcast::channel(64usize);
+    let mut state = TableHandlerState::new(index_merge_completion_tx);
 
     // Normal conditions with no pending snapshot and result consumed
     state.iceberg_snapshot_result_consumed = true;
