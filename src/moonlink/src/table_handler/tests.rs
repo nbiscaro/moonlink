@@ -1702,3 +1702,21 @@ fn test_is_iceberg_snapshot_satisfy_force_snapshot() {
         );
     }
 }
+
+#[test]
+fn test_can_initiate_iceberg_snapshot_pending_flush() {
+    let mut state = TableHandlerState::new();
+
+    // Normal conditions with no pending snapshot and result consumed
+    state.iceberg_snapshot_result_consumed = true;
+    state.iceberg_snapshot_ongoing = false;
+
+    // Pending flush with lower LSN should block
+    assert!(!state.can_initiate_iceberg_snapshot(10, 5));
+
+    // Pending flush with equal LSN should also block
+    assert!(!state.can_initiate_iceberg_snapshot(5, 5));
+
+    // When the lowest pending flush is higher than the snapshot flush LSN, snapshot can proceed
+    assert!(state.can_initiate_iceberg_snapshot(5, 6));
+}
