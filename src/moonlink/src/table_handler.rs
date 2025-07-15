@@ -146,10 +146,12 @@ impl TableHandlerState {
 
     // Used to decide whether we could create an iceberg snapshot.
     // The completion of an iceberg snapshot is **NOT** marked as the finish of snapshot thread, but the handling of its results.
-    // We can only create a new iceberg snapshot when (1) there's no ongoing iceberg snapshot; and (2) previous snapshot results have been acknowledged.
+    // We can only create a new iceberg snapshot when (1) there's no ongoing iceberg snapshot, (2) previous snapshot results have been acknowledged, and (3) there's no pending flush with pending_lsn < flush_lsn.
     //
-    fn can_initiate_iceberg_snapshot(&self) -> bool {
-        self.iceberg_snapshot_result_consumed && !self.iceberg_snapshot_ongoing
+    fn can_initiate_iceberg_snapshot(&self, flush_lsn: u64, min_pending_flush_lsn: u64) -> bool {
+        self.iceberg_snapshot_result_consumed
+            && !self.iceberg_snapshot_ongoing
+            && flush_lsn < min_pending_flush_lsn
     }
 
     fn reset_iceberg_state_at_mooncake_snapshot(&mut self) {
@@ -489,7 +491,8 @@ impl TableHandler {
                             table.notify_snapshot_reader(lsn);
 
                             // Process iceberg snapshot and trigger iceberg snapshot if necessary.
-                            if table_handler_state.can_initiate_iceberg_snapshot() {
+                            let min_pending_flush_lsn = table.get_min_pending_flush_lsn();
+                            if table_handler_state.can_initiate_iceberg_snapshot(lsn, min_pending_flush_lsn) {
                                 if let Some(iceberg_snapshot_payload) = iceberg_snapshot_payload {
                                     table_handler_state.iceberg_snapshot_ongoing = true;
                                     table.persist_iceberg_snapshot(iceberg_snapshot_payload);
@@ -569,6 +572,7 @@ impl TableHandler {
                             table_handler_state.maintainance_ongoing = false;
                         }
                         TableEvent::FlushResult { flush_result, lsn} => {
+                            table.remove_pending_flush_lsn(lsn);
                             table.set_flush_result(flush_result, lsn);
                         }
                         TableEvent::ReadRequest { cache_handles } => {
