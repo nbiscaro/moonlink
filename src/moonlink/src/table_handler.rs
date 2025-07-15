@@ -167,7 +167,7 @@ impl TableHandlerState {
         }
     }
 
-    fn force_snapshot_requested(&self, cur_lsn: u64) -> bool {
+    fn force_snapshot_requested(&self, cur_lsn: u64, min_pending_flush_lsn: u64) -> bool {
         !self.pending_force_snapshot_lsns.is_empty()
             && cur_lsn
                 >= *self
@@ -178,6 +178,7 @@ impl TableHandlerState {
                     .unwrap()
                     .0
             && !self.mooncake_snapshot_ongoing
+            && cur_lsn < min_pending_flush_lsn
     }
 
     fn should_discard_event(&self, event: &TableEvent) -> bool {
@@ -673,8 +674,10 @@ impl TableHandler {
                 // 1. force snapshot is requested
                 // and 2. LSN which meets force snapshot requirement has appeared, before that we still allow buffering
                 // and 3. there's no snapshot creation operation ongoing
+                // and 4. there's no pending flush with lsn < current lsn
 
-                let force_snapshot = table_handler_state.force_snapshot_requested(lsn);
+                let force_snapshot = table_handler_state
+                    .force_snapshot_requested(lsn, table.get_min_pending_flush_lsn());
 
                 match xact_id {
                     Some(xact_id) => {
