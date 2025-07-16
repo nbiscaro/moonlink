@@ -1138,6 +1138,65 @@ async fn test_flush_lsn_out_of_order_lsn_operations() {
     env.shutdown().await;
 }
 
+/// Inject a pending snapshot LSN and ensure the snapshot completes when the
+/// required commit arrives.
+#[tokio::test]
+async fn test_inject_pending_snapshot_lsn() {
+    let mut env = TestEnvironment::default().await;
+
+    // Subscribe to flush_lsn updates
+    let mut flush_lsn_rx = env.table_event_manager.subscribe_flush_lsn();
+
+    // Lower pending LSN should prevent iceberg snapshot from being created.
+    env.start_mock_flush(2).await;
+
+    // Prepare some data and commit at LSN 1.
+    env.append_row(1, "Alice", 25, /*lsn=*/ 1, None).await;
+    env.commit(1).await;
+
+    // Create snapshot should work
+    let mut rx1 = env.table_event_manager.initiate_snapshot(1).await;
+    rx1.recv().await.unwrap().unwrap();
+    flush_lsn_rx.changed().await.unwrap();
+    assert_eq!(*flush_lsn_rx.borrow(), 1);
+
+    // Prepare some data and commit at LSN 2.
+    env.append_row(1, "Alice", 25, /*lsn=*/ 2, None).await;
+    env.commit(2).await;
+
+    // Create snapshot should block by lower pending LSN
+    let _rx2 = env.table_event_manager.initiate_snapshot(3).await;
+
+    // Make sure snapshot hasnt changed
+    let mut iceberg_table_manager =
+        env.create_iceberg_table_manager(MooncakeTableConfig::default());
+    let (_, snapshot) = iceberg_table_manager
+        .load_snapshot_from_table()
+        .await
+        .unwrap();
+    assert_eq!(snapshot.data_file_flush_lsn, Some(1));
+
+    // Finish the lower pending flush
+    env.finish_flush(1).await;
+
+    // Try the snapshot again, should work
+    let mut rx2 = env.table_event_manager.initiate_snapshot(3).await;
+    rx2.recv().await.unwrap().unwrap();
+
+    // Verify flush_lsn matches expected LSN in order
+    flush_lsn_rx.changed().await.unwrap();
+    assert_eq!(*flush_lsn_rx.borrow(), 3);
+
+    // Verify persistence by loading from iceberg
+    let (_, snapshot) = iceberg_table_manager
+        .load_snapshot_from_table()
+        .await
+        .unwrap();
+    assert_eq!(snapshot.data_file_flush_lsn, Some(3));
+
+    env.shutdown().await;
+}
+
 /// Test flush_lsn consistency across multiple snapshots
 #[tokio::test]
 async fn test_flush_lsn_consistency_across_snapshots() {

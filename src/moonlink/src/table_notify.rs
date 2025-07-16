@@ -124,6 +124,10 @@ pub enum TableEvent {
         /// Evicted data files by object storage cache.
         evicted_data_files: Vec<String>,
     },
+    /// Inject a pending force snapshot LSN. Used only for testing to
+    /// simulate out-of-order flush completions.
+    #[cfg(test)]
+    InjectPendingFlushLsn { lsn: u64 },
 }
 
 impl TableEvent {

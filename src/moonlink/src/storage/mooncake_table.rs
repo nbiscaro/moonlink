@@ -844,7 +844,7 @@ impl MooncakeTable {
     // - tracks all record batches by current snapshot task
     // - persists all full batch records to local filesystem
     pub fn flush(&mut self, lsn: u64) -> Result<()> {
-        self.pending_flush_lsns.insert(lsn);
+        self.insert_pending_flush_lsn(lsn);
         let table_notify_tx = self.table_notify.as_ref().unwrap().clone();
 
         if self.mem_slice.is_empty() {
@@ -901,6 +901,10 @@ impl MooncakeTable {
         );
 
         Ok(())
+    }
+
+    pub fn insert_pending_flush_lsn(&mut self, lsn: u64) {
+        self.pending_flush_lsns.insert(lsn);
     }
 
     pub fn remove_pending_flush_lsn(&mut self, lsn: u64) {
@@ -1139,6 +1143,7 @@ impl MooncakeTable {
 
     /// Create an iceberg snapshot.
     pub(crate) fn persist_iceberg_snapshot(&mut self, snapshot_payload: IcebergSnapshotPayload) {
+        assert!(self.get_min_pending_flush_lsn() > snapshot_payload.flush_lsn);
         // Check invariant: there's at most one ongoing iceberg snapshot.
         let iceberg_table_manager = self.iceberg_table_manager.take().unwrap();
 

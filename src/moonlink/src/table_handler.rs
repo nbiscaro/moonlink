@@ -613,6 +613,10 @@ impl TableHandler {
                         TableEvent::EvictedDataFilesToDelete { evicted_data_files } => {
                             start_task_to_delete_evicted(evicted_data_files);
                         }
+                        #[cfg(test)]
+                        TableEvent::InjectPendingFlushLsn { lsn } => {
+                            table.insert_pending_flush_lsn(lsn);
+                        }
                         // ==============================
                         // Replication events
                         // ==============================

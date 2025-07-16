@@ -247,6 +247,19 @@ impl TestEnvironment {
         self.send_event(TableEvent::Flush { lsn }).await;
     }
 
+    pub async fn start_mock_flush(&self, lsn: u64) {
+        self.send_event(TableEvent::InjectPendingFlushLsn { lsn })
+            .await;
+    }
+
+    pub async fn finish_flush(&self, lsn: u64) {
+        self.send_event(TableEvent::FlushResult {
+            flush_result: None,
+            lsn,
+        })
+        .await;
+    }
+
     pub async fn stream_flush(&self, xact_id: u32) {
         self.send_event(TableEvent::StreamFlush { xact_id }).await;
     }
