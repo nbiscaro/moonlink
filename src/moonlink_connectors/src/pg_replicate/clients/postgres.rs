@@ -121,15 +121,11 @@ impl ReplicationClient {
         &mut self,
         table_name: &TableName,
     ) -> Result<(), ReplicationClientError> {
-        self.postgres_client.simple_query("BEGIN;").await?;
-        self.in_txn = true;
         let query = format!(
             "ALTER PUBLICATION moonlink_pub ADD TABLE {};",
             table_name.as_quoted_identifier()
         );
         self.postgres_client.simple_query(&query).await?;
-        self.postgres_client.simple_query("COMMIT;").await?;
-        self.in_txn = false;
         Ok(())
     }
 
