@@ -293,10 +293,7 @@ impl MooncakeTable {
             snapshot_task.new_flush_lsn = Some(lsn);
             Ok(())
         } else {
-            panic!(
-                "Transaction stream state not found for xact_id: {}",
-                xact_id
-            );
+            panic!("Transaction stream state not found for xact_id: {xact_id}");
         }
     }
 }
