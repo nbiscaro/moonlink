@@ -167,9 +167,6 @@ impl ReplicationClient {
             table_name.as_quoted_identifier(),
         );
 
-        // self.postgres_client.simple_query("COMMIT;").await?;
-        // self.in_txn = false;
-
         let stream = self.postgres_client.copy_out_simple(&copy_query).await?;
 
         // Note that we keep the transaction open
