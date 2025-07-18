@@ -300,7 +300,7 @@ impl ReplicationConnection {
             error!(error = ?e, "failed to enqueue AddTable command");
         }
 
-        // Create a dedicated source for the copy and register and snapshot the table.
+        // Create a dedicated source for the copy
         let mut copy_source = PostgresSource::new(
             &self.uri,
             Some(self.slot_name.clone()),
