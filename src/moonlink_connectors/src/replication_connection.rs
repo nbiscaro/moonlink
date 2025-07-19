@@ -303,7 +303,7 @@ impl ReplicationConnection {
         // Create a dedicated source for the copy
         let mut copy_source = PostgresSource::new(
             &self.uri,
-            Some(self.slot_name.clone()),
+            None,
             TableNamesFrom::Vec(vec![schema.table_name.clone()]),
             false,
         )
