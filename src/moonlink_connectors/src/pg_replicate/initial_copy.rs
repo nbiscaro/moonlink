@@ -37,7 +37,7 @@ pub async fn copy_table_stream_impl(
             .send(TableEvent::Append {
                 row: PostgresTableRow(row).into(),
                 xact_id: None,
-                lsn: stream.start_lsn.into(),
+                lsn: 0,
                 is_copied: true,
             })
             .await

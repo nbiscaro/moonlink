@@ -242,9 +242,8 @@ impl TableHandlerState {
     /// Enter initial copy mode. Subsequent CDC events will be
     /// buffered in `initial_copy_buffered_events` until `finish_initial_copy` is called.
     /// We set `initial_persistence_lsn` to the start LSN to avoid duplicate events that may have already been captured by the initial copy.
-    fn start_initial_copy(&mut self, start_lsn: u64) {
+    fn start_initial_copy(&mut self) {
         self.special_table_state = SpecialTableState::InitialCopy;
-        self.initial_persistence_lsn = Some(start_lsn);
     }
 
     fn finish_initial_copy(&mut self) {
@@ -472,13 +471,13 @@ impl TableHandler {
                         TableEvent::AlterTable { columns_to_drop } => {
                             debug!("altering table, dropping columns: {:?}", columns_to_drop);
                         }
-                        TableEvent::StartInitialCopy { start_lsn } => {
+                        TableEvent::StartInitialCopy => {
                             debug!("starting initial copy");
-                            table_handler_state.start_initial_copy(start_lsn);
+                            table_handler_state.start_initial_copy();
                         }
                         TableEvent::FinishInitialCopy { start_lsn } => {
                             debug!("finishing initial copy");
-                            if let Err(e) = table.commit_transaction_stream(INITIAL_COPY_XACT_ID, start_lsn).await {
+                            if let Err(e) = table.commit_transaction_stream(INITIAL_COPY_XACT_ID, 0).await {
                                 error!(error = %e, "failed to finish initial copy");
                             }
                             // Force create the snapshot with LSN 0
@@ -491,6 +490,8 @@ impl TableHandler {
                             table_handler_state.mooncake_snapshot_ongoing = true;
                             table_handler_state.finish_initial_copy();
 
+                            // Drop any events that have LSN less than the start LSN during apply.
+                            table_handler_state.initial_persistence_lsn = Some(start_lsn);
                             // Apply the buffered events.
                             let buffered_events = table_handler_state.initial_copy_buffered_events.drain(..).collect::<Vec<_>>();
                             for event in buffered_events {
@@ -672,12 +673,13 @@ impl TableHandler {
             }
         );
 
-        // In the case that this is an initial copy event we acutally expect the LSN to be less than the initial persistence LSN, hence we don't discard it.
-        if table_handler_state.should_discard_event(&event) && !is_initial_copy_event {
-            return;
-        }
         if table_handler_state.is_in_blocking_state() && !is_initial_copy_event {
             table_handler_state.initial_copy_buffered_events.push(event);
+            return;
+        }
+
+        // In the case that this is an initial copy event we acutally expect the LSN to be less than the initial persistence LSN, hence we don't discard it.
+        if table_handler_state.should_discard_event(&event) && !is_initial_copy_event {
             return;
         }
         assert_eq!(

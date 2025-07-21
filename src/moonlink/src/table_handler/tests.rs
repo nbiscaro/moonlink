@@ -1221,7 +1221,7 @@ async fn test_initial_copy_basic() {
 
     // Start initial copy workflow.
     sender
-        .send(TableEvent::StartInitialCopy { start_lsn: 0 })
+        .send(TableEvent::StartInitialCopy)
         .await
         .expect("send start initial copy");
 
