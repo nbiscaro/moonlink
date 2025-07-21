@@ -309,48 +309,54 @@ impl ReplicationConnection {
         )
         .await?;
 
-        // Add table to publication first to begin accumulating any cdc events.
-        // We can check where our initial copy started from and discard any rows we have already seen.
-        // We should add to publication regardless of whether we are recovering or not.
-        copy_source
-            .add_table_to_publication(&schema.table_name)
-            .await?;
-
         // Check if there are existing rows
         let row_count = copy_source.get_row_count(&schema.table_name).await?;
 
         // Only perform initial copy for new tables, not during recovery.
         // Early return if there are no rows to copy.
         if !is_recovery && row_count > 0 {
-            let stream = copy_source
-                .get_table_copy_stream(&schema.table_name, &schema.column_schemas)
-                .await?;
-            let start_lsn = stream.start_lsn.into();
-            if let Err(e) = event_sender_clone
-                .send(TableEvent::StartInitialCopy { start_lsn })
-                .await
-            {
+            if let Err(e) = event_sender_clone.send(TableEvent::StartInitialCopy).await {
                 error!(error = ?e, "failed to send StartInitialCopy event");
             }
 
+            // Alter the publication to add the table.
+            // Add table to publication first to begin accumulating any cdc events.
+            // We can check where our initial copy started from and discard any rows we have already seen.
+            copy_source
+                .add_table_to_publication(&schema.table_name)
+                .await?;
+
             let schema_clone = schema.clone();
             tokio::spawn(async move {
+                let (stream, start_lsn) = copy_source
+                    .get_table_copy_stream(&schema_clone.table_name, &schema_clone.column_schemas)
+                    .await
+                    .expect("failed to get table copy stream");
                 let res = copy_table_stream_impl(schema_clone, stream, &event_sender_clone).await;
-                // We have finsihed consuming the stream, so commit the transaction
-                // We keep the transaction open since the COMMIT will block until the COPY TO is complete.
-                if let Err(e) = copy_source.commit_transaction().await {
-                    error!(error = ?e, "failed to commit transaction");
-                }
+
                 if let Err(e) = res {
                     error!(error = ?e, table_id = src_table_id, "failed to copy table");
                 }
+                // Commit the transaction
+                copy_source
+                    .commit_transaction()
+                    .await
+                    .expect("failed to commit transaction");
+
                 if let Err(e) = event_sender_clone
-                    .send(TableEvent::FinishInitialCopy { start_lsn })
+                    .send(TableEvent::FinishInitialCopy {
+                        start_lsn: start_lsn.into(),
+                    })
                     .await
                 {
                     error!(error = ?e, table_id = src_table_id, "failed to send FinishTableCopy command");
                 }
             });
+        } else {
+            // If there are no rows to copy, we still need to add the table to publication.
+            copy_source
+                .add_table_to_publication(&schema.table_name)
+                .await?;
         }
 
         debug!(table_id, "table added to replication");

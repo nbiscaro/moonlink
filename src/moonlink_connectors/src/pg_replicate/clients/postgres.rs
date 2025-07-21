@@ -158,7 +158,7 @@ impl ReplicationClient {
         self.postgres_client.simple_query("BEGIN;").await?;
         self.in_txn = true;
 
-        // Get the current LSN
+        // Get the current LSN before we start the copy
         let current_wal_lsn = self.get_current_wal_lsn().await?;
 
         // TODO(nbiscaro): Use binary format instead of text.

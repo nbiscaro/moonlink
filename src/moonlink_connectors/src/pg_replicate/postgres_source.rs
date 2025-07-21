@@ -110,6 +110,13 @@ impl PostgresSource {
         self.slot_name.as_ref()
     }
 
+    pub async fn get_current_wal_lsn(&mut self) -> Result<PgLsn, PostgresSourceError> {
+        self.replication_client
+            .get_current_wal_lsn()
+            .await
+            .map_err(PostgresSourceError::ReplicationClient)
+    }
+
     async fn drive_connection(connection: Connection<Socket, NoTlsStream>) {
         if let Err(e) = connection.await {
             warn!("connection error: {}", e);
@@ -204,20 +211,22 @@ impl PostgresSource {
         &mut self,
         table_name: &TableName,
         column_schemas: &[ColumnSchema],
-    ) -> Result<TableCopyStream, PostgresSourceError> {
+    ) -> Result<(TableCopyStream, PgLsn), PostgresSourceError> {
         debug!("starting table copy stream for table {table_name}");
 
-        let (stream, lsn) = self
+        let (stream, start_lsn) = self
             .replication_client
             .get_table_copy_stream(table_name, column_schemas)
             .await
             .map_err(PostgresSourceError::ReplicationClient)?;
 
-        Ok(TableCopyStream {
-            stream,
-            column_schemas: column_schemas.to_vec(),
-            start_lsn: lsn,
-        })
+        Ok((
+            TableCopyStream {
+                stream,
+                column_schemas: column_schemas.to_vec(),
+            },
+            start_lsn,
+        ))
     }
 
     pub async fn commit_transaction(&mut self) -> Result<(), PostgresSourceError> {
@@ -289,7 +298,6 @@ pin_project! {
         #[pin]
         stream: CopyOutStream,
         column_schemas: Vec<ColumnSchema>,
-        pub(crate) start_lsn: PgLsn,
     }
 }
 
