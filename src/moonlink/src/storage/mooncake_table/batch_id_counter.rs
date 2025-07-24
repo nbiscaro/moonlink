@@ -167,7 +167,7 @@ mod tests {
 
         // All IDs should be in streaming range
         for id in &all_ids {
-            assert!(*id < (1u64 << 32), "ID {} should be in streaming range", id);
+            assert!(*id < (1u64 << 32), "ID {id} should be in streaming range");
         }
 
         // IDs should be consecutive starting from 0

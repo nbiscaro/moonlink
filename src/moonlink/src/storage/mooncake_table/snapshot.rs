@@ -589,8 +589,7 @@ impl SnapshotTableState {
                         }
                     )
                     .is_none(),
-                "Batch ID {} already exists in self.batches",
-                id
+                "Batch ID {id} already exists in self.batches"
             );
         }
     }
