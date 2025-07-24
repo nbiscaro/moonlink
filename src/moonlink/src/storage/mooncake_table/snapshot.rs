@@ -570,7 +570,7 @@ impl SnapshotTableState {
         // Use the counter to ensure unique ID and follow proper allocation strategy
         let next_id = self.non_streaming_batch_id_counter.next();
 
-        // Assert that the batch is not already in the map.
+        // Add to batch and assert that the batch is not already in the map.
         assert!(self
             .batches
             .insert(next_id, InMemoryBatch::new(batch_size))
@@ -660,7 +660,7 @@ impl SnapshotTableState {
                 .delete_memory_index(slice.old_index());
 
             slice.input_batches().iter().for_each(|b| {
-                // Assert that the batch is in the map.
+                // Remove from batch and assert that the batch is in the map.
                 assert!(self.batches.remove(&b.id).is_some());
             });
         }
