@@ -14,6 +14,7 @@ use crate::storage::filesystem::accessor::base_filesystem_accessor::BaseFileSyst
 use crate::storage::index::{cache_utils as index_cache_utils, FileIndex};
 use crate::storage::mooncake_table::persistence_buffer::UnpersistedRecords;
 use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
+use crate::storage::mooncake_table::BatchIdCounter;
 use crate::storage::mooncake_table::MoonlinkRow;
 use crate::storage::mooncake_table::SnapshotOption;
 use crate::storage::storage_utils::{FileId, TableId, TableUniqueFileId};
@@ -73,6 +74,9 @@ pub(crate) struct SnapshotTableState {
     /// Iceberg snapshot is created in an async style, which means it doesn't correspond 1-1 to mooncake snapshot, so we need to ensure idempotency for iceberg snapshot payload.
     /// The following fields record unpersisted content, which will be placed in iceberg payload everytime.
     pub(super) unpersisted_records: UnpersistedRecords,
+
+    /// Batch ID counter for non-streaming operations
+    pub(super) non_streaming_batch_id_counter: Arc<BatchIdCounter>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,9 +108,15 @@ impl SnapshotTableState {
         object_storage_cache: ObjectStorageCache,
         filesystem_accessor: Arc<dyn BaseFileSystemAccess>,
         current_snapshot: Snapshot,
+        non_streaming_batch_id_counter: Arc<BatchIdCounter>,
     ) -> Result<Self> {
         let mut batches = BTreeMap::new();
-        batches.insert(0, InMemoryBatch::new(metadata.config.batch_size));
+        // Properly consume a batch ID from the counter to avoid collision with main MemSlice
+        let initial_batch_id = non_streaming_batch_id_counter.next();
+        batches.insert(
+            initial_batch_id,
+            InMemoryBatch::new(metadata.config.batch_size),
+        );
 
         let table_config = metadata.config.clone();
         Ok(Self {
@@ -114,22 +124,30 @@ impl SnapshotTableState {
             current_snapshot,
             batches,
             rows: None,
-            last_commit: RecordLocation::MemoryBatch(0, 0),
+            last_commit: RecordLocation::MemoryBatch(initial_batch_id, 0),
             object_storage_cache,
             filesystem_accessor,
             table_notify: None,
             committed_deletion_log: Vec::new(),
             uncommitted_deletion_log: Vec::new(),
             unpersisted_records: UnpersistedRecords::new(table_config),
+            non_streaming_batch_id_counter,
         })
     }
 
     pub(crate) fn reset_for_alter(&mut self, new_metadata: Arc<MooncakeTableMetadata>) {
         self.batches = BTreeMap::new();
-        self.batches
-            .insert(0, InMemoryBatch::new(new_metadata.config.batch_size));
+        // Initialize with a proper batch ID from the counter to avoid collisions
+        let initial_batch_id = self.non_streaming_batch_id_counter.load();
+        assert!(self
+            .batches
+            .insert(
+                initial_batch_id,
+                InMemoryBatch::new(new_metadata.config.batch_size)
+            )
+            .is_none());
         self.rows = None;
-        self.last_commit = RecordLocation::MemoryBatch(0, 0);
+        self.last_commit = RecordLocation::MemoryBatch(initial_batch_id, 0);
         self.current_snapshot.metadata = new_metadata.clone();
         self.mooncake_table_metadata = new_metadata;
     }
@@ -549,20 +567,32 @@ impl SnapshotTableState {
 
         // start a fresh empty batch after the newest data
         let batch_size = self.current_snapshot.metadata.config.batch_size;
-        let next_id = incoming.last().unwrap().0 + 1;
-        self.batches.insert(next_id, InMemoryBatch::new(batch_size));
+        // Use the counter to ensure unique ID and follow proper allocation strategy
+        let next_id = self.non_streaming_batch_id_counter.next();
 
-        // add completed batches
-        self.batches
-            .extend(incoming.into_iter().skip(1).map(|(id, rb)| {
-                (
-                    id,
-                    InMemoryBatch {
-                        data: Some(rb.clone()),
-                        deletions: BatchDeletionVector::new(rb.num_rows()),
-                    },
-                )
-            }));
+        // Assert that the batch is not already in the map.
+        assert!(self
+            .batches
+            .insert(next_id, InMemoryBatch::new(batch_size))
+            .is_none());
+
+        // Add completed batches
+        // Assert that no incoming batch ID is already present in the map.
+        for (id, rb) in incoming.into_iter().skip(1) {
+            assert!(
+                self.batches
+                    .insert(
+                        id,
+                        InMemoryBatch {
+                            data: Some(rb.clone()),
+                            deletions: BatchDeletionVector::new(rb.num_rows()),
+                        }
+                    )
+                    .is_none(),
+                "Batch ID {} already exists in self.batches",
+                id
+            );
+        }
     }
 
     /// Return files evicted from object storage cache.
@@ -631,7 +661,8 @@ impl SnapshotTableState {
                 .delete_memory_index(slice.old_index());
 
             slice.input_batches().iter().for_each(|b| {
-                self.batches.remove(&b.id);
+                // Assert that the batch is in the map.
+                assert!(self.batches.remove(&b.id).is_some());
             });
         }
 
