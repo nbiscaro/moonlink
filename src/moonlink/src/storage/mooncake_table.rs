@@ -1,3 +1,4 @@
+mod batch_id_counter;
 mod data_batches;
 pub(crate) mod delete_vector;
 mod disk_slice;
@@ -35,6 +36,7 @@ use crate::storage::iceberg::iceberg_table_config::IcebergTableConfig;
 use crate::storage::iceberg::iceberg_table_manager::IcebergTableManager;
 use crate::storage::iceberg::table_manager::{PersistenceFileParams, TableManager};
 use crate::storage::index::persisted_bucket_hash_map::GlobalIndexBuilder;
+use crate::storage::mooncake_table::batch_id_counter::BatchIdCounter;
 use crate::storage::mooncake_table::shared_array::SharedRowBufferSnapshot;
 pub use crate::storage::mooncake_table::snapshot_read_output::ReadOutput as SnapshotReadOutput;
 #[cfg(test)]
@@ -592,6 +594,10 @@ pub struct MooncakeTable {
     /// Note, these ids is only used locally, and not persisted.
     next_file_id: u32,
 
+    /// Batch ID counters for the two-counter allocation strategy
+    non_streaming_batch_id_counter: Arc<BatchIdCounter>,
+    streaming_batch_id_counter: Arc<BatchIdCounter>,
+
     /// Iceberg table manager, used to sync snapshot to the corresponding iceberg table.
     iceberg_table_manager: Option<Box<dyn TableManager>>,
 
@@ -658,11 +664,15 @@ impl MooncakeTable {
             table_snapshot_watch_sender.send(persistence_lsn).unwrap();
         }
 
+        let non_streaming_batch_id_counter = Arc::new(BatchIdCounter::new(false));
+        let streaming_batch_id_counter = Arc::new(BatchIdCounter::new(true));
+
         Ok(Self {
             mem_slice: MemSlice::new(
                 table_metadata.schema.clone(),
                 table_metadata.config.batch_size,
                 table_metadata.identity.clone(),
+                Arc::clone(&non_streaming_batch_id_counter),
             ),
             metadata: table_metadata.clone(),
             snapshot: Arc::new(RwLock::new(
@@ -671,6 +681,7 @@ impl MooncakeTable {
                     object_storage_cache,
                     filesystem_accessor,
                     current_snapshot,
+                    Arc::clone(&non_streaming_batch_id_counter),
                 )
                 .await?,
             )),
@@ -680,6 +691,8 @@ impl MooncakeTable {
             table_snapshot_watch_sender,
             table_snapshot_watch_receiver,
             next_file_id,
+            non_streaming_batch_id_counter,
+            streaming_batch_id_counter,
             iceberg_table_manager: Some(table_manager),
             last_iceberg_snapshot_lsn,
             last_wal_persisted_metadata,
@@ -716,6 +729,7 @@ impl MooncakeTable {
             new_metadata.schema.clone(),
             new_metadata.config.batch_size,
             new_metadata.identity.clone(),
+            Arc::clone(&self.non_streaming_batch_id_counter),
         );
         self.metadata = new_metadata.clone();
         new_metadata
