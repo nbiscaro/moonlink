@@ -4,8 +4,8 @@ use std::sync::Arc;
 /// Batch ID counter for the two-counter allocation strategy.
 ///
 /// The system uses two separate atomic counters to partition the 64-bit batch ID space:
-/// - **Streaming Counter**: Range 0 -> 2^32-1, used for streaming transactions
-/// - **Non-Streaming Counter**: Range 2^32+, used for regular operations
+/// - **Streaming Counter**: Range 0 -> 2^63-1, used for streaming transactions
+/// - **Non-Streaming Counter**: Range 2^63+, used for regular operations
 ///
 /// We give streaming batches the smaller range so that they are always behind the commit point, which points to the most recently added batch of the non-streaming batches.
 /// This ensures batch IDs are always monotonically increasing and unique across all transactions.
@@ -17,7 +17,7 @@ pub(super) struct BatchIdCounter {
 impl BatchIdCounter {
     pub fn new(is_streaming: bool) -> Self {
         Self {
-            counter: Arc::new(AtomicU64::new(if is_streaming { 0 } else { 1u64 << 32 })),
+            counter: Arc::new(AtomicU64::new(if is_streaming { 0 } else { 1u64 << 63 })),
             is_streaming,
         }
     }
@@ -32,8 +32,8 @@ impl BatchIdCounter {
         // Check limits before incrementing
         if self.is_streaming {
             assert!(
-                current < (1u64 << 32),
-                "Streaming batch ID counter overflow: exceeded 2^32-1"
+                current < (1u64 << 63),
+                "Streaming batch ID counter overflow: exceeded 2^63-1"
             );
         } else {
             assert!(
@@ -61,7 +61,7 @@ mod tests {
     #[test]
     fn test_non_streaming_counter_creation() {
         let counter = BatchIdCounter::new(false);
-        assert_eq!(counter.load(), 1u64 << 32);
+        assert_eq!(counter.load(), 1u64 << 63);
         assert!(!counter.is_streaming);
     }
 
@@ -81,24 +81,24 @@ mod tests {
     #[test]
     fn test_non_streaming_counter_next() {
         let counter = BatchIdCounter::new(false);
-        let expected_start = 1u64 << 32;
+        let expected_start = 1u64 << 63;
 
-        // First call should return 2^32, then increment to 2^32 + 1
+        // First call should return 2^63, then increment to 2^63 + 1
         assert_eq!(counter.next(), expected_start);
         assert_eq!(counter.load(), expected_start + 1);
 
-        // Second call should return 2^32 + 1, then increment to 2^32 + 2
+        // Second call should return 2^63 + 1, then increment to 2^63 + 2
         assert_eq!(counter.next(), expected_start + 1);
         assert_eq!(counter.load(), expected_start + 2);
     }
 
     #[test]
-    #[should_panic(expected = "Streaming batch ID counter overflow: exceeded 2^32-1")]
+    #[should_panic(expected = "Streaming batch ID counter overflow: exceeded 2^63-1")]
     fn test_streaming_counter_overflow() {
         let counter = BatchIdCounter::new(true);
 
         // Manually set counter to the limit
-        let limit = 1u64 << 32;
+        let limit = 1u64 << 63;
         counter.counter.store(limit, Ordering::Relaxed);
 
         // This should panic
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn test_streaming_counter_near_limit() {
         let counter = BatchIdCounter::new(true);
-        let near_limit = (1u64 << 32) - 2;
+        let near_limit = (1u64 << 63) - 2;
 
         // Set counter near the limit
         counter.counter.store(near_limit, Ordering::Relaxed);
@@ -167,7 +167,7 @@ mod tests {
 
         // All IDs should be in streaming range
         for id in &all_ids {
-            assert!(*id < (1u64 << 32), "ID {id} should be in streaming range");
+            assert!(*id < (1u64 << 63), "ID {id} should be in streaming range");
         }
 
         // IDs should be consecutive starting from 0
