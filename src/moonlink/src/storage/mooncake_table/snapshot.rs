@@ -567,8 +567,7 @@ impl SnapshotTableState {
 
         // start a fresh empty batch after the newest data
         let batch_size = self.current_snapshot.metadata.config.batch_size;
-        // Use the counter to ensure unique ID and follow proper allocation strategy
-        let next_id = self.non_streaming_batch_id_counter.next();
+        let next_id = incoming.last().unwrap().0 + 1;
 
         // Add to batch and assert that the batch is not already in the map.
         assert!(self
