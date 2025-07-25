@@ -22,10 +22,12 @@ impl BatchIdCounter {
         }
     }
 
+    // Relaxed ordering is used here because the counter is only used for internal state tracking, not for synchronization.
     pub fn load(&self) -> u64 {
         self.counter.load(Ordering::Relaxed)
     }
 
+    // Relaxed ordering is used here because the counter is only used for internal state tracking, not for synchronization.
     pub fn next(&self) -> u64 {
         let current = self.counter.load(Ordering::Relaxed);
 
