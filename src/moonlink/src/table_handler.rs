@@ -9,20 +9,25 @@
 /// - persisted table LSN: the largest LSN where all updates have been persisted into iceberg
 ///   Suppose we have two tables, table-A has persisted all updated into iceberg; with table-B taking new updates. persisted table LSN for table-A grows with table-B.
 use crate::event_sync::EventSyncSender;
+use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
+use crate::storage::mooncake_table::transaction_stream::TransactionStreamCommit;
 use crate::storage::mooncake_table::AlterTableRequest;
+use crate::storage::mooncake_table::DiskFileEntry;
+use crate::storage::mooncake_table::DiskSliceWriter;
 use crate::storage::mooncake_table::MaintenanceOption;
 use crate::storage::mooncake_table::SnapshotOption;
 use crate::storage::mooncake_table::INITIAL_COPY_XACT_ID;
 use crate::storage::{io_utils, MooncakeTable};
 use crate::table_notify::TableEvent;
-use crate::Error;
+use crate::{Error, Result};
+use more_asserts as ma;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tracing::Instrument;
 use tracing::{debug, error, info_span};
-mod table_handler_state;
+pub mod table_handler_state;
 use table_handler_state::{
     MaintenanceProcessStatus, MaintenanceRequestStatus, SpecialTableState, TableHandlerState,
 };
@@ -272,7 +277,7 @@ impl TableHandler {
                         }
                         TableEvent::FinishInitialCopy { start_lsn } => {
                             debug!("finishing initial copy");
-                            if let Err(e) = table.commit_transaction_stream(INITIAL_COPY_XACT_ID, 0).await {
+                            if let Err(e) = table.commit_transaction_stream(INITIAL_COPY_XACT_ID, 0) {
                                 error!(error = %e, "failed to finish initial copy");
                             }
                             // Force create the snapshot with LSN 0
@@ -303,7 +308,7 @@ impl TableHandler {
                             // Check whether a flush and force snapshot is needed.
                             if table_handler_state.has_pending_force_snapshot_request() && !table_handler_state.iceberg_snapshot_ongoing {
                                 if let Some(commit_lsn) = table_handler_state.table_consistent_view_lsn {
-                                    table.flush(commit_lsn).await.unwrap();
+                                    Self::flush_table(&mut table, commit_lsn, &mut table_handler_state);
                                     table_handler_state.reset_iceberg_state_at_mooncake_snapshot();
                                     if let SpecialTableState::AlterTable { .. } = table_handler_state.special_table_state {
                                         table.force_empty_iceberg_payload();
@@ -471,6 +476,9 @@ impl TableHandler {
                                 return;
                             }
                         }
+                        TableEvent::FlushResult { xact_id, flush_result, lsn } => {
+                            Self::set_flush_result(&mut table, lsn, &mut table_handler_state, flush_result, xact_id);
+                        }
                         TableEvent::ReadRequestCompletion { cache_handles } => {
                             table.set_read_request_res(cache_handles);
                         }
@@ -548,8 +556,8 @@ impl TableHandler {
                     Some(xact_id) => {
                         let res = table.append_in_stream_batch(row, xact_id);
                         if table.should_transaction_flush(xact_id) {
-                            if let Err(e) = table.flush_transaction_stream(xact_id).await {
-                                error!(error = %e, "flush failed in append");
+                            if let Err(e) = table.flush(None, Some(xact_id)) {
+                                error!(error = %e, "failed to flush transaction");
                             }
                         }
                         res
@@ -591,13 +599,91 @@ impl TableHandler {
                 .await;
             }
             TableEvent::StreamFlush { xact_id } => {
-                if let Err(e) = table.flush_transaction_stream(xact_id).await {
-                    error!(error = %e, "stream flush failed");
+                if let Err(e) = table.flush(None, Some(xact_id)) {
+                    error!(error = %e, "failed to flush transaction");
                 }
             }
             _ => {
                 unreachable!("unexpected event: {:?}", event)
             }
+        }
+    }
+
+    /// Set flush result, which will append the flushed disk slice into current task.
+    /// Also remove the LSN from pending flush LSNs.
+    pub(crate) fn set_flush_result(
+        table: &mut MooncakeTable,
+        lsn: Option<u64>,
+        table_handler_state: &mut TableHandlerState,
+        flush_result: Option<Result<DiskSliceWriter>>,
+        xact_id: Option<u32>,
+    ) {
+        if let Some(lsn) = lsn {
+            table.set_flush_lsn(lsn);
+        }
+        match flush_result {
+            Some(Ok(mut disk_slice)) => {
+                // Add the flushed files from the disk slice.
+                // If this is a stream commit, add them to the stream state, otherwise add them direclty to the next snapshot task.
+                if let Some(xact_id) = xact_id {
+                    let stream_state = table.get_transaction_stream_state(xact_id).unwrap();
+                    for (file, file_attrs) in disk_slice.take_output_files() {
+                        ma::assert_gt!(file_attrs.file_size, 0);
+                        let disk_file_entry = DiskFileEntry {
+                            file_size: file_attrs.file_size,
+                            cache_handle: None,
+                            batch_deletion_vector: BatchDeletionVector::new(file_attrs.row_num),
+                            puffin_deletion_blob: None,
+                        };
+                        stream_state.insert_flushed_file(file.clone(), disk_file_entry);
+                    }
+                    let index = disk_slice.take_index();
+                    if let Some(index) = index {
+                        stream_state.insert_flushed_file_index(index);
+                    }
+                } else {
+                    table.add_new_disk_slice(disk_slice);
+                }
+
+                // Check if this is a stream commit.
+                if let (Some(lsn), Some(xact_id)) = (lsn, xact_id) {
+                    // If both lsn and xact_id are provided, it means this is a stream commit.
+                    // We need to do all of the post-flush commit processing here.
+                    let stream_state = table.remove_transaction_stream_state(xact_id);
+
+                    let commit = TransactionStreamCommit {
+                        xact_id,
+                        commit_lsn: lsn,
+                        flushed_file_index: stream_state.flushed_file_index,
+                        flushed_files: stream_state.flushed_files,
+                        local_deletions: stream_state.local_deletions,
+                        pending_deletions: stream_state.pending_deletions_in_main_mem_slice,
+                    };
+                    table.add_stream_commit_to_next_snapshot_task(commit);
+                }
+            }
+            Some(Err(e)) => {
+                error!(error = %e, "failed to flush mem slice");
+            }
+            None => {
+                debug!("flush result is none");
+            }
+        }
+        if let Some(lsn) = lsn {
+            table_handler_state.pending_flush_lsns.remove(&lsn);
+        }
+    }
+
+    /// Adds flush LSN to pending flush LSNs, and flush the table.
+    /// We should only flush the table using this function, and not directly call `table.flush(lsn)`.
+    fn flush_table(
+        table: &mut MooncakeTable,
+        lsn: u64,
+        table_handler_state: &mut TableHandlerState,
+    ) {
+        table_handler_state.pending_flush_lsns.insert(lsn);
+        if let Err(e) = table.flush(Some(lsn), None) {
+            error!(error = %e, "flush failed in commit");
         }
     }
 
@@ -638,16 +724,14 @@ impl TableHandler {
                         return;
                     }
                 }
-                if let Err(e) = table.commit_transaction_stream(xact_id, lsn).await {
+                if let Err(e) = table.commit_transaction_stream(xact_id, lsn) {
                     error!(error = %e, "stream commit flush failed");
                 }
             }
             None => {
                 table.commit(lsn);
                 if table.should_flush() || should_force_snapshot || force_flush_requested {
-                    if let Err(e) = table.flush(lsn).await {
-                        error!(error = %e, "flush failed in commit");
-                    }
+                    Self::flush_table(table, lsn, table_handler_state);
                 }
             }
         }
@@ -661,7 +745,6 @@ impl TableHandler {
         }
     }
 }
-
 #[cfg(test)]
 mod tests;
 

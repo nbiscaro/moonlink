@@ -1,6 +1,7 @@
 use crate::row::MoonlinkRow;
 use crate::storage::mooncake_table::DataCompactionPayload;
 use crate::storage::mooncake_table::DataCompactionResult;
+use crate::storage::mooncake_table::DiskSliceWriter;
 use crate::storage::mooncake_table::FileIndiceMergePayload;
 use crate::storage::mooncake_table::FileIndiceMergeResult;
 use crate::storage::mooncake_table::IcebergSnapshotPayload;
@@ -132,6 +133,15 @@ pub enum TableEvent {
     DataCompactionResult {
         /// Result for data compaction.
         data_compaction_result: Result<DataCompactionResult>,
+    },
+    /// Non-streaming flush completes.
+    FlushResult {
+        // Transaction ID
+        xact_id: Option<u32>,
+        /// Result for mem slice flush.
+        flush_result: Option<Result<DiskSliceWriter>>,
+        /// LSN of the flush.
+        lsn: Option<u64>,
     },
     /// Read request completion.
     ReadRequestCompletion {

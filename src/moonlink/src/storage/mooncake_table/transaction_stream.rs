@@ -3,8 +3,8 @@ use crate::storage::cache::object_storage::base_cache::{CacheEntry, CacheTrait, 
 use crate::storage::index::cache_utils as index_cache_utils;
 use crate::storage::mooncake_table::DiskFileEntry;
 use crate::storage::storage_utils::{ProcessedDeletionRecord, TableUniqueFileId};
+use crate::Error;
 use fastbloom::BloomFilter;
-use more_asserts as ma;
 /// Used to track the state of a streamed transaction
 /// Holds appending rows in memslice and files.
 /// Deletes are more complex,
@@ -13,13 +13,15 @@ use more_asserts as ma;
 /// 3. row belong to main table's flushed files, directly pushed to snapshot_task.new_deletions and let snapshot handle it.
 /// 4. row belong to main table's memslice, add to `pending_deletions_in_main_mem_slice`, and handle at commit time`
 ///
-pub(super) struct TransactionStreamState {
-    mem_slice: MemSlice,
-    local_deletions: Vec<ProcessedDeletionRecord>,
-    pending_deletions_in_main_mem_slice: Vec<RawDeletionRecord>,
+pub(crate) struct TransactionStreamState {
+    pub(crate) mem_slice: MemSlice,
+    pub(crate) local_deletions: Vec<ProcessedDeletionRecord>,
+    pub(crate) pending_deletions_in_main_mem_slice: Vec<RawDeletionRecord>,
     index_bloom_filter: BloomFilter,
-    flushed_file_index: MooncakeIndex,
-    flushed_files: hashbrown::HashMap<MooncakeDataFileRef, DiskFileEntry>,
+    pub(crate) flushed_file_index: MooncakeIndex,
+    pub(crate) flushed_files: hashbrown::HashMap<MooncakeDataFileRef, DiskFileEntry>,
+    // This is not really used as a snapshot task, just used to hold state during flush.
+    pub(crate) next_snapshot_task: SnapshotTask,
 }
 
 pub enum TransactionStreamOutput {
@@ -28,12 +30,12 @@ pub enum TransactionStreamOutput {
 }
 
 pub struct TransactionStreamCommit {
-    xact_id: u32,
-    commit_lsn: u64,
-    flushed_file_index: MooncakeIndex,
-    flushed_files: hashbrown::HashMap<MooncakeDataFileRef, DiskFileEntry>,
-    local_deletions: Vec<ProcessedDeletionRecord>,
-    pending_deletions: Vec<RawDeletionRecord>,
+    pub(crate) xact_id: u32,
+    pub(crate) commit_lsn: u64,
+    pub(crate) flushed_file_index: MooncakeIndex,
+    pub(crate) flushed_files: hashbrown::HashMap<MooncakeDataFileRef, DiskFileEntry>,
+    pub(crate) local_deletions: Vec<ProcessedDeletionRecord>,
+    pub(crate) pending_deletions: Vec<RawDeletionRecord>,
 }
 
 impl TransactionStreamCommit {
@@ -76,7 +78,16 @@ impl TransactionStreamState {
             index_bloom_filter: BloomFilter::with_num_bits(1 << 24).expected_items(1_000_000),
             flushed_file_index: MooncakeIndex::new(),
             flushed_files: hashbrown::HashMap::new(),
+            next_snapshot_task: SnapshotTask::new(MooncakeTableConfig::default()),
         }
+    }
+
+    pub(crate) fn insert_flushed_file(&mut self, file: MooncakeDataFileRef, entry: DiskFileEntry) {
+        self.flushed_files.insert(file, entry);
+    }
+
+    pub(crate) fn insert_flushed_file_index(&mut self, index: FileIndex) {
+        self.flushed_file_index.insert_file_index(index);
     }
 }
 
@@ -105,6 +116,22 @@ impl MooncakeTable {
             })
     }
 
+    pub(crate) fn get_transaction_stream_state(
+        &mut self,
+        xact_id: u32,
+    ) -> Result<&mut TransactionStreamState> {
+        self.transaction_stream_states
+            .get_mut(&xact_id)
+            .ok_or(Error::TransactionNotFound(xact_id))
+    }
+
+    pub(crate) fn remove_transaction_stream_state(
+        &mut self,
+        xact_id: u32,
+    ) -> TransactionStreamState {
+        self.transaction_stream_states.remove(&xact_id).unwrap()
+    }
+
     pub fn should_transaction_flush(&self, xact_id: u32) -> bool {
         self.transaction_stream_states
             .get(&xact_id)
@@ -119,9 +146,15 @@ impl MooncakeTable {
         let identity_for_key = self.metadata.identity.extract_identity_for_key(&row);
 
         let stream_state = self.get_or_create_stream_state(xact_id);
-        stream_state
+        if let Some(batch) = stream_state
             .mem_slice
-            .append(lookup_key, row, identity_for_key)?;
+            .append(lookup_key, row, identity_for_key)?
+        {
+            stream_state
+                .next_snapshot_task
+                .new_record_batches
+                .push(batch);
+        }
         stream_state.index_bloom_filter.insert(&lookup_key);
         Ok(())
     }
@@ -198,6 +231,9 @@ impl MooncakeTable {
             stream_state
                 .pending_deletions_in_main_mem_slice
                 .push(record);
+        // Delete from stream state snapshot task.
+        // TODO: Search the stream state snapshot task
+        // record.pos =
         } else {
             self.next_snapshot_task.new_deletions.push(record);
         }
@@ -211,88 +247,66 @@ impl MooncakeTable {
             .push(TransactionStreamOutput::Abort(xact_id));
     }
 
-    pub async fn flush_transaction_stream(&mut self, xact_id: u32) -> Result<()> {
-        if let Some(stream_state) = self.transaction_stream_states.get_mut(&xact_id) {
-            let next_file_id = self.next_file_id;
-            self.next_file_id += 1;
-            let mut disk_slice = Self::flush_mem_slice(
-                &mut stream_state.mem_slice,
-                &self.metadata,
-                next_file_id,
-                None,
-                None,
-            )
-            .await?;
-
-            for (file, file_attrs) in disk_slice.output_files().iter() {
-                ma::assert_gt!(file_attrs.file_size, 0);
-                let disk_file_entry = DiskFileEntry {
-                    file_size: file_attrs.file_size,
-                    cache_handle: None,
-                    batch_deletion_vector: BatchDeletionVector::new(file_attrs.row_num),
-                    puffin_deletion_blob: None,
-                };
-                stream_state
-                    .flushed_files
-                    .insert(file.clone(), disk_file_entry);
-            }
-            let index = disk_slice.take_index();
-            if let Some(index) = index {
-                stream_state.flushed_file_index.insert_file_index(index);
-            }
-            return Ok(());
-        }
-        Ok(())
-    }
-
     /// Commit a transaction stream commit.
-    /// This is used to commit a transaction stream commit that was buffered during initial copy.
-    /// It will be applied to the table at the end of initial copy.
-    pub async fn commit_transaction_stream(&mut self, xact_id: u32, lsn: u64) -> Result<()> {
-        self.flush_transaction_stream(xact_id).await?;
-        if let Some(mut stream_state) = self.transaction_stream_states.remove(&xact_id) {
-            // Sanith check flush LSN doesn't regress.
-            assert!(
-                self.next_snapshot_task.new_flush_lsn.is_none()
-                    || self.next_snapshot_task.new_flush_lsn.unwrap() <= lsn,
-                "Current flush LSN is {:?}, new flush LSN is {}",
-                self.next_snapshot_task.new_flush_lsn,
-                lsn,
-            );
+    pub fn commit_transaction_stream(&mut self, xact_id: u32, lsn: u64) -> Result<()> {
+        let stream_state = self.get_transaction_stream_state(xact_id)?;
+        let commit_point = stream_state.mem_slice.get_commit_check_point();
+        // let latest_rows = stream_state.mem_slice.get_latest_rows();
 
-            let snapshot_task = &mut self.next_snapshot_task;
-            snapshot_task.new_commit_lsn = lsn;
-
-            // We update our delete records with the last lsn of the transaction
-            // Note that in the stream case we dont have this until commit time
-            for deletion in stream_state.pending_deletions_in_main_mem_slice.iter_mut() {
-                let pos = deletion.pos.unwrap();
-                // If the row is no longer in memslice, it must be flushed, let snapshot task find it.
-                if !self.mem_slice.try_delete_at_pos(pos) {
-                    deletion.pos = None;
-                }
-            }
-
-            for deletion in stream_state.local_deletions.iter_mut() {
-                deletion.lsn = lsn - 1;
-            }
-
-            let commit = TransactionStreamCommit {
-                xact_id,
-                commit_lsn: lsn,
-                flushed_file_index: stream_state.flushed_file_index,
-                flushed_files: stream_state.flushed_files,
-                local_deletions: stream_state.local_deletions,
-                pending_deletions: stream_state.pending_deletions_in_main_mem_slice,
-            };
-            snapshot_task
-                .new_streaming_xact
-                .push(TransactionStreamOutput::Commit(commit));
-            snapshot_task.new_flush_lsn = Some(lsn);
-            Ok(())
-        } else {
-            panic!("Transaction stream state not found for xact_id: {xact_id}");
+        let mut batches = stream_state
+            .next_snapshot_task
+            .new_record_batches
+            .drain(..)
+            .collect::<Vec<_>>();
+        // Finalize latest rows in a new batch
+        if let Some(latest_batch) = stream_state
+            .mem_slice
+            .column_store
+            .finalize_current_batch()?
+        {
+            batches.push(latest_batch);
         }
+
+        let indices = stream_state
+            .next_snapshot_task
+            .new_mem_indices
+            .drain(..)
+            .collect::<Vec<_>>();
+
+        // Extract disk slices from streaming state before moving other data
+        let disk_slices = stream_state
+            .next_snapshot_task
+            .new_disk_slices
+            .drain(..)
+            .collect::<Vec<_>>();
+
+        // We update our delete records with the last lsn of the transaction
+        // Note that in the stream case we dont have this until commit time
+        for deletion in stream_state.pending_deletions_in_main_mem_slice.iter_mut() {
+            let pos = deletion.pos.unwrap();
+            // If the row is no longer in memslice, it must be flushed, let snapshot task find it.
+            if !stream_state.mem_slice.try_delete_at_pos(pos) {
+                deletion.pos = None;
+            }
+        }
+        for deletion in stream_state.local_deletions.iter_mut() {
+            deletion.lsn = lsn - 1;
+        }
+        // TODO: Do we need to update the lsn of the records that were added to the main snapshot task? I dont think this was done in the original imol so probs not but double check this.
+
+        // We move the indices and batches out of the stream state and into the tables next snapshot task.
+        // This makes them discoverable by the next mooncake snapshot task even while the flush is in progress.
+        self.next_snapshot_task.new_mem_indices.extend(indices);
+        self.next_snapshot_task.new_record_batches.extend(batches);
+
+        // Also move the row buffer from streaming state so that reads work during background flush
+        // self.next_snapshot_task.new_rows = Some(latest_rows);
+
+        self.next_snapshot_task.new_commit_lsn = lsn;
+        self.next_snapshot_task.new_commit_point = Some(commit_point);
+        self.flush(Some(lsn), Some(xact_id))?;
+
+        Ok(())
     }
 }
 

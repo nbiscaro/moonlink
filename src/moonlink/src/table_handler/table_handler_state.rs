@@ -5,6 +5,7 @@ use crate::storage::mooncake_table::MaintenanceOption;
 use crate::storage::mooncake_table::SnapshotOption;
 use crate::table_notify::TableEvent;
 use crate::Result;
+use hashbrown::HashSet;
 use tokio::sync::{broadcast, watch};
 use tracing::error;
 
@@ -66,7 +67,7 @@ impl MaintenanceProcessStatus {
     }
 }
 
-pub(crate) struct TableHandlerState {
+pub struct TableHandlerState {
     // cached table states
     //
     // Initial persisted LSN.
@@ -103,6 +104,8 @@ pub(crate) struct TableHandlerState {
     pub(crate) special_table_state: SpecialTableState,
     // Buffered events during blocking operations: initial copy, alter table, drop table, etc.
     pub(crate) initial_copy_buffered_events: Vec<TableEvent>,
+    /// Pending flush LSNs.
+    pub(crate) pending_flush_lsns: HashSet<u64>,
 
     // ================================================
     // Table maintainence status
@@ -144,6 +147,7 @@ impl TableHandlerState {
             table_maintenance_completion_tx,
             // Initial copy fields.
             initial_copy_buffered_events: Vec::new(),
+            pending_flush_lsns: HashSet::new(),
         }
     }
 

@@ -82,8 +82,7 @@ fn bench_write(c: &mut Criterion) {
                         values: row.values.clone(),
                     });
                 }
-                let handle = table.flush(100000);
-                handle.await.unwrap();
+                table.flush(100000, None).unwrap();
             });
         });
     });
@@ -125,8 +124,7 @@ fn bench_write(c: &mut Criterion) {
                         1,
                     );
                 }
-                let handle = table.flush(100000);
-                handle.await.unwrap();
+                table.flush(100000, None).unwrap();
             });
         });
     });

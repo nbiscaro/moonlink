@@ -24,11 +24,66 @@ use crate::{ReadState, Result};
 #[cfg(test)]
 pub(crate) async fn flush_table_and_sync(
     table: &mut MooncakeTable,
-    _receiver: &mut Receiver<TableEvent>,
+    receiver: &mut Receiver<TableEvent>,
     lsn: u64,
 ) -> Result<()> {
-    // TODO(Nolan): Use receiver to block wait until table flush finishes.
-    table.flush(lsn).await
+    table.flush(Some(lsn), None).unwrap();
+    let flush_result = receiver.recv().await.unwrap();
+    if let TableEvent::FlushResult {
+        xact_id,
+        flush_result,
+        lsn,
+    } = flush_result
+    {
+        use tokio::sync::{broadcast, watch};
+
+        use crate::{table_handler::table_handler_state::TableHandlerState, TableHandler};
+
+        let (table_maintenance_completion_tx, _) = broadcast::channel(64usize);
+        let (force_snapshot_completion_tx, _) = watch::channel(None);
+        let mut table_handler_state = TableHandlerState::new(
+            table_maintenance_completion_tx,
+            force_snapshot_completion_tx,
+            /*initial_persistence_lsn=*/ None,
+        );
+        TableHandler::set_flush_result(table, lsn, &mut table_handler_state, flush_result, xact_id);
+    } else {
+        panic!("Expected FlushResult as first event, but got others.");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) async fn commit_transaction_stream_and_sync(
+    table: &mut MooncakeTable,
+    receiver: &mut Receiver<TableEvent>,
+    xact_id: u32,
+    lsn: u64,
+) -> Result<()> {
+    table.commit_transaction_stream(xact_id, lsn)?;
+    let flush_result = receiver.recv().await.unwrap();
+    if let TableEvent::FlushResult {
+        xact_id,
+        flush_result,
+        lsn,
+    } = flush_result
+    {
+        use tokio::sync::{broadcast, watch};
+
+        use crate::{table_handler::table_handler_state::TableHandlerState, TableHandler};
+
+        let (table_maintenance_completion_tx, _) = broadcast::channel(64usize);
+        let (force_snapshot_completion_tx, _) = watch::channel(None);
+        let mut table_handler_state = TableHandlerState::new(
+            table_maintenance_completion_tx,
+            force_snapshot_completion_tx,
+            /*initial_persistence_lsn=*/ None,
+        );
+        TableHandler::set_flush_result(table, lsn, &mut table_handler_state, flush_result, xact_id);
+    } else {
+        panic!("Expected FlushResult as first event, but got others.");
+    }
+    Ok(())
 }
 
 /// ===============================
@@ -298,7 +353,7 @@ pub(crate) async fn create_mooncake_and_persist_for_data_compaction_for_test(
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::BestEffort,
     };
-    assert!(table.create_snapshot(force_snapshot_option.clone()));
+    assert!(table.create_snapshot(force_snapshot_option.clone())); // first snapshot
 
     // Create iceberg snapshot.
     let (_, iceberg_snapshot_payload, _, _, evicted_data_files_to_delete) =
@@ -315,7 +370,7 @@ pub(crate) async fn create_mooncake_and_persist_for_data_compaction_for_test(
     }
 
     // Get data compaction payload.
-    assert!(table.create_snapshot(force_snapshot_option.clone()));
+    assert!(table.create_snapshot(force_snapshot_option.clone())); // second snapshot
     let (_, iceberg_snapshot_payload, _, data_compaction_payload, evicted_data_files_to_delete) =
         sync_mooncake_snapshot(table, receiver).await;
     // Delete evicted object storage cache entries immediately to make sure later accesses all happen on persisted files.
@@ -342,12 +397,14 @@ pub(crate) async fn create_mooncake_and_persist_for_data_compaction_for_test(
     // Set data compaction result and trigger another iceberg snapshot.
     table.set_data_compaction_res(data_compaction_result);
     assert!(table.create_snapshot(SnapshotOption {
+        // third snapshot (fails)
         force_create: true,
         skip_iceberg_snapshot: false,
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::BestEffort,
     }));
     sync_mooncake_snapshot_and_create_new_by_iceberg_payload(table, receiver).await;
+    // does not make it here so defs fails in the snapshot
 }
 
 // Test util function, which does the following things in serial fashion.

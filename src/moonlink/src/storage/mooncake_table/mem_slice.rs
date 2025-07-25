@@ -17,10 +17,10 @@ use std::sync::Arc;
 /// Reader will create a snapshot of the current state of the table,
 /// by applying all deletions to column store buffer
 ///
-pub(super) struct MemSlice {
+pub(crate) struct MemSlice {
     /// Column store buffer for storing data
     ///
-    column_store: ColumnStoreBuffer,
+    pub(crate) column_store: ColumnStoreBuffer,
 
     /// Mem index for the table
     ///

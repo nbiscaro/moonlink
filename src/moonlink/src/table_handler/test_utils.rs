@@ -323,9 +323,10 @@ pub async fn check_read_snapshot(
         decode_read_state_for_testing(&read_state);
 
     if data_files.is_empty() && !expected_ids.is_empty() {
-        unreachable!(
-            "No snapshot files returned for LSN {:?} when rows (IDs: {:?}) were expected. Expected files because expected_ids is not empty.",
-            target_lsn, expected_ids
+        panic!(
+            "No snapshot files returned for LSN {} when rows (IDs: {:?}) were expected. Expected files because expected_ids is not empty.",
+            target_lsn.unwrap_or(0),
+            expected_ids
         );
     }
     verify_files_and_deletions(

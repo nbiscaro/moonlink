@@ -560,24 +560,9 @@ impl SnapshotTableState {
         }
 
         let incoming = take(&mut task.new_record_batches);
-        // close previously‐open batch
-        assert!(self.batches.values().last().unwrap().data.is_none());
-        self.batches.last_entry().unwrap().get_mut().data = Some(incoming[0].1.clone());
 
-        // start a fresh empty batch after the newest data
-        let batch_size = self.current_snapshot.metadata.config.batch_size;
-        // Use the ID from the incoming batches rather than the counter, since the counter may have been further advanced elsewhere.
-        let next_id = incoming.last().unwrap().0 + 1;
-
-        // Add to batch and assert that the batch is not already in the map.
-        assert!(self
-            .batches
-            .insert(next_id, InMemoryBatch::new(batch_size))
-            .is_none());
-
-        // Add completed batches
-        // Assert that no incoming batch ID is already present in the map.
-        for (id, rb) in incoming.into_iter().skip(1) {
+        // Add all incoming batches with their original IDs to preserve streaming batch IDs
+        for (id, rb) in incoming.into_iter() {
             assert!(
                 self.batches
                     .insert(
@@ -591,6 +576,16 @@ impl SnapshotTableState {
                 "Batch ID {id} already exists in self.batches"
             );
         }
+
+        // Create a new empty batch using the non-streaming counter for future operations
+        let batch_size = self.current_snapshot.metadata.config.batch_size;
+        let next_id = self.non_streaming_batch_id_counter.next();
+
+        // Add new empty batch for future non-streaming operations
+        assert!(self
+            .batches
+            .insert(next_id, InMemoryBatch::new(batch_size))
+            .is_none());
     }
 
     /// Return files evicted from object storage cache.

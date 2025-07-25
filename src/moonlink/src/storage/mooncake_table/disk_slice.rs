@@ -16,12 +16,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Attributes for disk files.
+#[derive(Debug, Clone)]
 pub(crate) struct DiskFileAttrs {
     pub(crate) file_size: usize,
     pub(crate) row_num: usize,
 }
 
-pub(crate) struct DiskSliceWriter {
+#[derive(Clone)]
+pub struct DiskSliceWriter {
     /// The schema of the DiskSlice.
     ///
     schema: Arc<Schema>,
@@ -49,6 +51,12 @@ pub(crate) struct DiskSliceWriter {
 
     /// Records already flushed data files.
     files: Vec<(MooncakeDataFileRef, DiskFileAttrs)>,
+}
+
+impl std::fmt::Debug for DiskSliceWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiskSliceWriter").finish()
+    }
 }
 
 impl DiskSliceWriter {
@@ -117,6 +125,11 @@ impl DiskSliceWriter {
     /// Get the list of files in the DiskSlice
     pub(crate) fn get_file_index(&self) -> Option<FileIndex> {
         self.new_index.clone()
+    }
+
+    // Get the list of files in the DiskSlice
+    pub(crate) fn take_output_files(&mut self) -> Vec<(MooncakeDataFileRef, DiskFileAttrs)> {
+        std::mem::take(&mut self.files)
     }
 
     /// Import file indices into cache.

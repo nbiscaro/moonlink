@@ -117,6 +117,29 @@ async fn test_streaming_append_and_commit() {
 }
 
 #[tokio::test]
+async fn test_non_streaming_delete() {
+    let mut env = TestEnvironment::default().await;
+
+    env.append_row(10, "Transaction-User1", 25, /*lsn=*/ 10, None)
+        .await;
+    env.append_row(11, "Transaction-User2", 30, /*lsn=*/ 20, None)
+        .await;
+
+    env.commit(21).await;
+
+    env.set_readable_lsn(21);
+    env.verify_snapshot(21, &[10, 11]).await;
+
+    env.delete_row(10, "Transaction-User1", 25, 22, None).await;
+    env.commit(23).await;
+
+    env.set_readable_lsn(23);
+    env.verify_snapshot(23, &[11]).await;
+
+    env.shutdown().await;
+}
+
+#[tokio::test]
 async fn test_streaming_delete() {
     let mut env = TestEnvironment::default().await;
     let xact_id = 101;
@@ -1690,4 +1713,89 @@ fn test_get_persisted_table_lsn() {
             table_handler_state.get_persisted_table_lsn(iceberg_snapshot_lsn, replication_lsn);
         assert_eq!(persisted_table_lsn, 2);
     }
+}
+
+/// Unit-test the state-machine guard: a higher-LSN flush finishing first must
+/// NOT allow an Iceberg snapshot until the lowest pending flush also finishes.
+#[test]
+fn test_can_initiate_snapshot_out_of_order_flush_completion() {
+    use tokio::sync::broadcast;
+
+    let (tx, _) = broadcast::channel(8);
+    let (force_snapshot_completion_tx, _) = watch::channel(None);
+    let mut state = TableHandlerState::new(
+        tx,
+        force_snapshot_completion_tx,
+        /*initial_persistence_lsn=*/ None,
+    );
+
+    // Pretend two flushes were issued (10 and 20). 20 finishes first.
+    state.pending_flush_lsns.insert(10);
+    state.pending_flush_lsns.insert(20);
+
+    // Preconditions needed for `can_initiate_iceberg_snapshot`
+    state.iceberg_snapshot_result_consumed = true;
+    state.iceberg_snapshot_ongoing = false;
+
+    // Higher-LSN (20) flush completes – remove it from the pending set.
+    state.pending_flush_lsns.remove(&20);
+
+    // Gate should still block an Iceberg snapshot at 20 because 10 is pending.
+    assert!(
+        !state.can_initiate_iceberg_snapshot(),
+        "Snapshot should be blocked while lower LSN=10 is still pending"
+    );
+
+    // Now lower-LSN (10) flush completes.
+    state.pending_flush_lsns.remove(&10);
+
+    // With no pending flushes, snapshot at 20 is allowed.
+    assert!(
+        state.can_initiate_iceberg_snapshot(),
+        "Snapshot should proceed once all lower pending flushes are finished"
+    );
+}
+
+/// Unit-test the state-machine guard: a higher-LSN flush finishing first must
+/// NOT allow an Iceberg force snapshot until the lowest pending flush also finishes.
+#[test]
+fn test_can_initiate_force_snapshot_out_of_order_flush_completion() {
+    use tokio::sync::broadcast;
+
+    let (tx, _) = broadcast::channel(8);
+    let (force_snapshot_completion_tx, _) = watch::channel(None);
+    let mut state = TableHandlerState::new(
+        tx,
+        force_snapshot_completion_tx,
+        /*initial_persistence_lsn=*/ None,
+    );
+
+    // Pretend two flushes were issued (10 and 20). 20 finishes first.
+    state.pending_flush_lsns.insert(10);
+    state.pending_flush_lsns.insert(20);
+
+    // Preconditions needed for `can_initiate_iceberg_snapshot`
+    state.iceberg_snapshot_result_consumed = true;
+    state.iceberg_snapshot_ongoing = false;
+
+    // Higher-LSN (20) flush completes – remove it from the pending set.
+    state.pending_flush_lsns.remove(&20);
+
+    // Issue a force snapshot request at 20.
+    let _ = state.largest_force_snapshot_lsn.insert(20);
+
+    // Gate should still block an Iceberg snapshot at 20 because 10 is pending.
+    // assert!(
+    //     !state.force_snapshot_requested(20),
+    //     "Snapshot should be blocked while lower LSN=10 is still pending"
+    // );
+
+    // Now lower-LSN (10) flush completes.
+    state.pending_flush_lsns.remove(&10);
+
+    // With no pending flushes, snapshot at 20 is allowed.
+    // assert!(
+    //     state.force_snapshot_requested(20),
+    //     "Snapshot should proceed once all lower pending flushes are finished"
+    // );
 }

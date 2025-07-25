@@ -17,7 +17,7 @@ pub mod table_secret;
 mod table_snapshot;
 pub mod table_status;
 pub mod table_status_reader;
-mod transaction_stream;
+pub mod transaction_stream;
 
 use super::iceberg::puffin_utils::PuffinBlobRef;
 use super::index::index_merge_config::FileIndexMergeConfig;
@@ -47,6 +47,7 @@ pub(crate) use crate::storage::mooncake_table::table_snapshot::{
     IcebergSnapshotDataCompactionResult, IcebergSnapshotImportPayload,
     IcebergSnapshotIndexMergePayload, IcebergSnapshotPayload, IcebergSnapshotResult,
 };
+use crate::storage::mooncake_table::transaction_stream::TransactionStreamCommit;
 use crate::storage::storage_utils::{FileId, TableId};
 use crate::storage::wal::wal_persistence_metadata::WalPersistenceMetadata;
 use crate::table_notify::TableEvent;
@@ -54,11 +55,12 @@ use crate::NonEvictableHandle;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema;
 use delete_vector::BatchDeletionVector;
-pub(crate) use disk_slice::DiskSliceWriter;
+pub use disk_slice::DiskSliceWriter;
 use mem_slice::MemSlice;
 pub(crate) use snapshot::{PuffinDeletionBlobAtRead, SnapshotTableState};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use table_snapshot::{IcebergSnapshotImportResult, IcebergSnapshotIndexMergeResult};
 #[cfg(test)]
@@ -174,7 +176,7 @@ impl MooncakeTableConfig {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TableMetadata {
     /// table name
     pub(crate) name: String,
@@ -592,7 +594,7 @@ pub struct MooncakeTable {
 
     /// Auto increment id for generating unique file ids.
     /// Note, these ids is only used locally, and not persisted.
-    next_file_id: u32,
+    next_file_id: AtomicU32,
 
     /// Batch ID counters for the two-counter allocation strategy
     non_streaming_batch_id_counter: Arc<BatchIdCounter>,
@@ -686,11 +688,11 @@ impl MooncakeTable {
                 .await?,
             )),
             mooncake_snapshot_ongoing: false,
-            next_snapshot_task: SnapshotTask::new(table_metadata.as_ref().config.clone()),
+            next_snapshot_task: SnapshotTask::new(table_metadata.config.clone()),
             transaction_stream_states: HashMap::new(),
             table_snapshot_watch_sender,
             table_snapshot_watch_receiver,
-            next_file_id,
+            next_file_id: AtomicU32::new(next_file_id),
             non_streaming_batch_id_counter,
             streaming_batch_id_counter,
             iceberg_table_manager: Some(table_manager),
@@ -936,6 +938,12 @@ impl MooncakeTable {
         );
     }
 
+    pub fn add_stream_commit_to_next_snapshot_task(&mut self, commit: TransactionStreamCommit) {
+        self.next_snapshot_task
+            .new_streaming_xact
+            .push(TransactionStreamOutput::Commit(commit));
+    }
+
     /// Shutdown the current table, which unpins all referenced data files in the global data file.
     pub async fn shutdown(&mut self) -> Result<()> {
         let evicted_files_to_delete = {
@@ -954,82 +962,102 @@ impl MooncakeTable {
         self.mem_slice.get_num_rows() >= self.metadata.config.mem_slice_size
     }
 
-    /// Flush `mem_slice` into parquet files and return the resulting `DiskSliceWriter`.
-    ///
-    /// When `snapshot_task` is provided, new batches and indices are recorded so
-    /// that they can be included in the next snapshot.  The `lsn` parameter
-    /// specifies the commit LSN for the flushed data.  When `lsn` is `None` the
-    /// caller is responsible for setting the final LSN on the returned
-    /// `DiskSliceWriter`.
-    async fn flush_mem_slice(
-        mem_slice: &mut MemSlice,
-        metadata: &Arc<TableMetadata>,
-        next_file_id: u32,
-        lsn: Option<u64>,
-        snapshot_task: Option<&mut SnapshotTask>,
-    ) -> Result<DiskSliceWriter> {
-        // Finalize the current batch (if needed)
-        let (new_batch, batches, index) = mem_slice.drain().unwrap();
-
-        let index = Arc::new(index);
-        if let Some(task) = snapshot_task {
-            if let Some(batch) = new_batch {
-                task.new_record_batches.push(batch);
-            }
-            task.new_mem_indices.push(index.clone());
-        }
-
-        let path = metadata.path.clone();
-        let parquet_flush_threshold_size = metadata.config.disk_slice_parquet_file_size;
-
-        let mut disk_slice = DiskSliceWriter::new(
-            metadata.schema.clone(),
-            path,
-            batches,
-            lsn,
-            next_file_id,
-            index,
-            parquet_flush_threshold_size,
-        );
-
-        disk_slice.write().await?;
-        Ok(disk_slice)
-    }
-
     // UNDONE(BATCH_INSERT):
     // Flush uncommitted batches from big batch insert, whether how much record batch there is.
     //
     // This function
     // - tracks all record batches by current snapshot task
     // - persists all full batch records to local filesystem
-    pub async fn flush(&mut self, lsn: u64) -> Result<()> {
-        // Sanith check flush LSN doesn't regress.
-        assert!(
-            self.next_snapshot_task.new_flush_lsn.is_none()
-                || self.next_snapshot_task.new_flush_lsn.unwrap() <= lsn,
-            "Current flush LSN is {:?}, new flush LSN is {}",
-            self.next_snapshot_task.new_flush_lsn,
-            lsn,
-        );
-        self.next_snapshot_task.new_flush_lsn = Some(lsn);
+    pub fn flush(&mut self, lsn: Option<u64>, xact_id: Option<u32>) -> Result<()> {
+        // Sanity check flush LSN doesn't regress.
+        if let Some(lsn) = lsn {
+            assert!(
+                self.next_snapshot_task.new_flush_lsn.is_none()
+                    || self.next_snapshot_task.new_flush_lsn.unwrap() <= lsn,
+                "Current flush LSN is {:?}, new flush LSN is {}",
+                self.next_snapshot_task.new_flush_lsn,
+                lsn,
+            );
+        } else {
+            // The only time we are able to flush without LSN is when we are flushing a transaction stream periodically.
+            assert!(xact_id.is_some());
+        }
 
-        if self.mem_slice.is_empty() {
+        // If we are in streaming transaction, we should use the mem slice and "snapshot" from the transaction stream state.
+        let (mem_slice, next_snapshot_task) = if let Some(xact_id) = xact_id {
+            let stream_state = self.transaction_stream_states.get_mut(&xact_id).unwrap();
+            (
+                &mut stream_state.mem_slice,
+                &mut stream_state.next_snapshot_task,
+            )
+        } else {
+            (&mut self.mem_slice, &mut self.next_snapshot_task)
+        };
+
+        let table_notify_tx = self.table_notify.as_ref().unwrap().clone();
+
+        if mem_slice.is_empty() {
+            tokio::task::spawn(async move {
+                table_notify_tx
+                    .send(TableEvent::FlushResult {
+                        xact_id,
+                        flush_result: None,
+                        lsn,
+                    })
+                    .await
+                    .unwrap();
+            });
             return Ok(());
         }
 
-        let next_file_id = self.next_file_id;
-        self.next_file_id += 1;
-        let disk_slice = Self::flush_mem_slice(
-            &mut self.mem_slice,
-            &self.metadata,
-            next_file_id,
-            Some(lsn),
-            Some(&mut self.next_snapshot_task),
-        )
-        .await?;
-        self.next_snapshot_task.new_disk_slices.push(disk_slice);
+        let next_file_id = self.next_file_id.fetch_add(1, Ordering::SeqCst) + 1;
+
+        // Drain mem slice and prepare information for background flush.
+        let (new_batch, batches, index) = mem_slice.drain().unwrap();
+        let index = Arc::new(index);
+
+        if let Some(batch) = new_batch {
+            next_snapshot_task.new_record_batches.push(batch);
+        }
+        next_snapshot_task.new_mem_indices.push(index.clone());
+
+        let path = self.metadata.path.clone();
+        let schema = self.metadata.schema.clone();
+        let parquet_flush_threshold_size = self.metadata.config.disk_slice_parquet_file_size;
+
+        tokio::task::spawn(
+            async move {
+                let mut disk_slice = DiskSliceWriter::new(
+                    schema,
+                    path,
+                    batches,
+                    lsn,
+                    next_file_id,
+                    index,
+                    parquet_flush_threshold_size,
+                );
+                let res = disk_slice.write().await;
+                table_notify_tx
+                    .send(TableEvent::FlushResult {
+                        xact_id,
+                        flush_result: Some(res.map(|_| disk_slice)),
+                        lsn,
+                    })
+                    .await
+                    .unwrap();
+            }
+            .instrument(info_span!("flush_mem_slice")),
+        );
 
         Ok(())
+    }
+
+    pub(crate) fn add_new_disk_slice(&mut self, disk_slice: DiskSliceWriter) {
+        self.next_snapshot_task.new_disk_slices.push(disk_slice);
+    }
+
+    pub(crate) fn set_flush_lsn(&mut self, lsn: u64) {
+        self.next_snapshot_task.new_flush_lsn = Some(lsn);
     }
 
     // Create a snapshot of the last committed version, return current snapshot's version and payload to perform iceberg snapshot.
@@ -1078,8 +1106,7 @@ impl MooncakeTable {
         &mut self,
         file_indice_merge_payload: FileIndiceMergePayload,
     ) {
-        let cur_file_id = self.next_file_id as u64;
-        self.next_file_id += 1;
+        let cur_file_id = (self.next_file_id.fetch_add(1, Ordering::SeqCst) + 1) as u64;
         let table_directory = std::path::PathBuf::from(self.metadata.path.to_str().unwrap());
         let table_notify_tx_copy = self.table_notify.as_ref().unwrap().clone();
 
@@ -1106,9 +1133,10 @@ impl MooncakeTable {
     pub(crate) fn perform_data_compaction(&mut self, compaction_payload: DataCompactionPayload) {
         let data_compaction_new_file_ids =
             compaction_payload.get_new_compacted_data_file_ids_number();
-        let table_auto_incr_ids =
-            self.next_file_id..(self.next_file_id + data_compaction_new_file_ids);
-        self.next_file_id += data_compaction_new_file_ids;
+        let start_file_id = self
+            .next_file_id
+            .fetch_add(data_compaction_new_file_ids, Ordering::SeqCst);
+        let table_auto_incr_ids = start_file_id..(start_file_id + data_compaction_new_file_ids);
         let file_params = CompactionFileParams {
             dir_path: self.metadata.path.clone(),
             table_auto_incr_ids,
@@ -1282,8 +1310,10 @@ impl MooncakeTable {
 
         // Create a detached task, whose completion will be notified separately.
         let new_file_ids_to_create = snapshot_payload.get_new_file_ids_num();
-        let table_auto_incr_ids = self.next_file_id..(self.next_file_id + new_file_ids_to_create);
-        self.next_file_id += new_file_ids_to_create;
+        let start_file_id = self
+            .next_file_id
+            .fetch_add(new_file_ids_to_create, Ordering::SeqCst);
+        let table_auto_incr_ids = start_file_id..(start_file_id + new_file_ids_to_create);
         tokio::task::spawn(
             Self::persist_iceberg_snapshot_impl(
                 iceberg_table_manager,
