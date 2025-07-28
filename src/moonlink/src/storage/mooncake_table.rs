@@ -70,7 +70,9 @@ use tracing::Instrument;
 use transaction_stream::{TransactionStreamOutput, TransactionStreamState};
 
 /// Special transaction id used for initial copy append operation.
-pub(crate) const INITIAL_COPY_XACT_ID: u32 = u32::MAX - 1;
+/// `0` is designated as `InvalidTransactionId` in the postgres implementation, so we can be sure this will never collide with a valid transaction id.
+/// [https://github.com/postgres/postgres/blob/d5b9b2d40262f57f58322ad49f8928fd4a492adb/src/include/access/transam.h#L31]
+pub(crate) const INITIAL_COPY_XACT_ID: u32 = 0;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct IcebergPersistenceConfig {
