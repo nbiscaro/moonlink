@@ -181,8 +181,12 @@ fn bench_write(c: &mut Criterion) {
                             1,
                         );
                     }
-                    let handle = table.flush_transaction_stream(1);
-                    handle.await.unwrap();
+                    let disk_slice = table.prepare_stream_disk_slice(1);
+                    table
+                        .flush_stream_disk_slice(1, &mut disk_slice)
+                        .await
+                        .unwrap();
+                    table.apply_stream_flush_result(1, disk_slice);
                 });
                 table
             },
@@ -198,8 +202,12 @@ fn bench_write(c: &mut Criterion) {
                             )
                             .await;
                     }
-                    let handle = table.flush_transaction_stream(1);
-                    handle.await.unwrap();
+                    let disk_slice = table.prepare_stream_disk_slice(1);
+                    table
+                        .flush_stream_disk_slice(1, &mut disk_slice)
+                        .await
+                        .unwrap();
+                    table.apply_stream_flush_result(1, disk_slice);
                     //let handle = table.create_snapshot();
                     //let _ = handle.unwrap().await.unwrap();
                 });
