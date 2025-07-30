@@ -557,14 +557,17 @@ impl TableHandler {
                     Some(xact_id) => {
                         let res = table.append_in_stream_batch(row, xact_id);
                         if table.should_transaction_flush(xact_id) {
-                            let mut disk_slice = table.prepare_stream_disk_slice(xact_id);
-                            if let Err(e) = table
-                                .flush_stream_disk_slice(xact_id, &mut disk_slice)
-                                .await
-                            {
-                                error!(error = %e, "flush failed in append");
+                            if let Ok(mut disk_slice) = table.prepare_stream_disk_slice(xact_id) {
+                                if let Err(e) = table
+                                    .flush_stream_disk_slice(xact_id, &mut disk_slice)
+                                    .await
+                                {
+                                    error!(error = %e, "flush failed in append");
+                                }
+                                table.apply_stream_flush_result(xact_id, disk_slice);
+                            } else {
+                                error!(error = "prepare stream disk slice failed");
                             }
-                            table.apply_stream_flush_result(xact_id, disk_slice);
                         }
                         res
                     }
@@ -605,14 +608,17 @@ impl TableHandler {
                 .await;
             }
             TableEvent::StreamFlush { xact_id } => {
-                let mut disk_slice = table.prepare_stream_disk_slice(xact_id);
-                if let Err(e) = table
-                    .flush_stream_disk_slice(xact_id, &mut disk_slice)
-                    .await
-                {
-                    error!(error = %e, "stream flush failed");
+                if let Ok(mut disk_slice) = table.prepare_stream_disk_slice(xact_id) {
+                    if let Err(e) = table
+                        .flush_stream_disk_slice(xact_id, &mut disk_slice)
+                        .await
+                    {
+                        error!(error = %e, "stream flush failed");
+                    }
+                    table.apply_stream_flush_result(xact_id, disk_slice);
+                } else {
+                    error!(error = "prepare stream disk slice failed");
                 }
-                table.apply_stream_flush_result(xact_id, disk_slice);
             }
             _ => {
                 unreachable!("unexpected event: {:?}", event)

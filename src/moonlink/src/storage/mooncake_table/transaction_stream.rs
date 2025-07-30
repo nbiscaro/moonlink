@@ -227,6 +227,10 @@ impl MooncakeTable {
 
     pub fn abort_in_stream_batch(&mut self, xact_id: u32) {
         // Record abortion in snapshot task so we can remove any uncomitted deletions
+        assert!(
+            self.transaction_stream_states.contains_key(&xact_id),
+            "Stream state not found for xact_id: {xact_id}"
+        );
         let stream_state = self.transaction_stream_states.get_mut(&xact_id).unwrap();
 
         stream_state.status = TransactionStreamStatus::Aborted;
@@ -244,7 +248,7 @@ impl MooncakeTable {
 
     /// Drains the current mem slice and prepares a disk slice for flushing.
     /// Adds current mem slice batches and indices to the stream state.
-    pub fn prepare_stream_disk_slice(&mut self, xact_id: u32) -> DiskSliceWriter {
+    pub fn prepare_stream_disk_slice(&mut self, xact_id: u32) -> Result<DiskSliceWriter> {
         assert!(
             self.transaction_stream_states.contains_key(&xact_id),
             "Stream state not found for xact_id: {xact_id}"
@@ -256,7 +260,7 @@ impl MooncakeTable {
 
         // Add filtered record batches to stream state
         // We filter here since in the stream case we delete from the current mem slice directly instead of adding to `new_deletions`
-        let (_, batches, index) = stream_state.mem_slice.drain().unwrap();
+        let (_, batches, index) = stream_state.mem_slice.drain()?;
         stream_state
             .new_record_batches
             .extend(batches.iter().filter_map(|b| {
@@ -276,7 +280,7 @@ impl MooncakeTable {
         let path = self.metadata.path.clone();
         let parquet_flush_threshold_size = self.metadata.config.disk_slice_parquet_file_size;
 
-        DiskSliceWriter::new(
+        let disk_slice = DiskSliceWriter::new(
             self.metadata.schema.clone(),
             path,
             batches,
@@ -284,7 +288,9 @@ impl MooncakeTable {
             next_file_id,
             index,
             parquet_flush_threshold_size,
-        )
+        );
+
+        Ok(disk_slice)
     }
 
     /// Flushes a disk slice for streaming transaction.
@@ -373,17 +379,18 @@ impl MooncakeTable {
     /// Updates deletion records
     /// Enqueues `TransactionStreamOutput::Commit` for snapshot task
     pub async fn commit_transaction_stream(&mut self, xact_id: u32, lsn: u64) -> Result<()> {
-        let mut disk_slice = self.prepare_stream_disk_slice(xact_id);
+        let mut disk_slice = self.prepare_stream_disk_slice(xact_id)?;
         self.flush_stream_disk_slice(xact_id, &mut disk_slice)
             .await?;
         self.next_snapshot_task.new_flush_lsn = Some(lsn);
         self.apply_stream_flush_result(xact_id, disk_slice);
 
         // Now remove and process the state
-        let stream_state = self
-            .transaction_stream_states
-            .get_mut(&xact_id)
-            .expect("stream state not found");
+        assert!(
+            self.transaction_stream_states.contains_key(&xact_id),
+            "Stream state not found for xact_id: {xact_id}"
+        );
+        let stream_state = self.transaction_stream_states.get_mut(&xact_id).unwrap();
 
         stream_state.commit_lsn = Some(lsn);
 
