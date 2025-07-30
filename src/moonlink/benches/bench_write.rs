@@ -181,7 +181,7 @@ fn bench_write(c: &mut Criterion) {
                             1,
                         );
                     }
-                    let disk_slice = table.prepare_stream_disk_slice(1);
+                    let mut disk_slice = table.prepare_stream_disk_slice(1);
                     table
                         .flush_stream_disk_slice(1, &mut disk_slice)
                         .await
@@ -202,7 +202,7 @@ fn bench_write(c: &mut Criterion) {
                             )
                             .await;
                     }
-                    let disk_slice = table.prepare_stream_disk_slice(1);
+                    let mut disk_slice = table.prepare_stream_disk_slice(1);
                     table
                         .flush_stream_disk_slice(1, &mut disk_slice)
                         .await

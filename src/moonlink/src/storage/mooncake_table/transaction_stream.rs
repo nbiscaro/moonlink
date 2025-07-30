@@ -274,7 +274,7 @@ impl MooncakeTable {
         let path = self.metadata.path.clone();
         let parquet_flush_threshold_size = self.metadata.config.disk_slice_parquet_file_size;
 
-        let disk_slice = DiskSliceWriter::new(
+        DiskSliceWriter::new(
             self.metadata.schema.clone(),
             path,
             batches,
@@ -282,9 +282,7 @@ impl MooncakeTable {
             next_file_id,
             index,
             parquet_flush_threshold_size,
-        );
-
-        disk_slice
+        )
     }
 
     /// Flushes a disk slice for streaming transaction.
