@@ -851,12 +851,12 @@ async fn test_streaming_begin_flush_commit_end_flush_multiple() {
     {
         let mut snapshot = table.snapshot.write().await;
         let SnapshotReadOutput {
-            data_file_paths, ..
+            mut data_file_paths,
+            ..
         } = snapshot.request_read().await.unwrap();
-        // First file contains first row
-        verify_file_contents(&data_file_paths[0].get_file_path(), &[1], Some(1));
-        // Second file contains second row
-        verify_file_contents(&data_file_paths[1].get_file_path(), &[2], Some(1));
+        data_file_paths.sort_by_key(|data_file| data_file.get_file_path());
+        verify_file_contents(&data_file_paths[1].get_file_path(), &[1], Some(1));
+        verify_file_contents(&data_file_paths[2].get_file_path(), &[2], Some(1));
     }
 }
 
