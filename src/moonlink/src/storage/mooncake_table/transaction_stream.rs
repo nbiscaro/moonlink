@@ -229,6 +229,8 @@ impl MooncakeTable {
         // Record abortion in snapshot task so we can remove any uncomitted deletions
         let stream_state = self.transaction_stream_states.get_mut(&xact_id).unwrap();
 
+        stream_state.status = TransactionStreamStatus::Aborted;
+
         // If there are no pending flushes, we can remove the stream state immediately
         // Otherwise, let `apply_stream_flush_result` handle the abortion
         if stream_state.pending_flush_count == 0 {
