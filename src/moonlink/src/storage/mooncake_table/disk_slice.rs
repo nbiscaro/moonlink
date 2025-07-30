@@ -21,7 +21,7 @@ pub(crate) struct DiskFileAttrs {
     pub(crate) row_num: usize,
 }
 
-pub(crate) struct DiskSliceWriter {
+pub struct DiskSliceWriter {
     /// The schema of the DiskSlice.
     ///
     schema: Arc<Schema>,
@@ -104,6 +104,10 @@ impl DiskSliceWriter {
 
     pub(super) fn lsn(&self) -> Option<u64> {
         self.writer_lsn
+    }
+
+    pub(crate) fn set_lsn(&mut self, lsn: u64) {
+        self.writer_lsn = Some(lsn);
     }
 
     pub(super) fn input_batches(&self) -> &Vec<BatchEntry> {

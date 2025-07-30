@@ -320,7 +320,8 @@ impl MooncakeTable {
         // Transaction committed while stream was flushing. Add disk slice to snapshot task and let snapshot handle it.
         // Drop the stream state since the transaction is over.
         if stream_state.status == TransactionStreamStatus::Committed {
-            disk_slice.writer_lsn = stream_state.commit_lsn;
+            assert!(stream_state.commit_lsn.is_some());
+            disk_slice.set_lsn(stream_state.commit_lsn.unwrap());
             self.next_snapshot_task.new_disk_slices.push(disk_slice);
             if stream_state.pending_flush_count == 0 {
                 self.transaction_stream_states.remove(&xact_id);
