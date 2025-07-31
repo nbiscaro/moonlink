@@ -717,7 +717,7 @@ async fn test_streaming_begin_flush_commit_end_flush() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let mut disk_slice = table.prepare_stream_disk_slice(xact_id).unwrap();
+    let mut disk_slice = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
     table
         .flush_stream_disk_slice(xact_id, &mut disk_slice)
         .await
@@ -786,7 +786,7 @@ async fn test_streaming_begin_flush_commit_end_flush_multiple() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let mut disk_slice1 = table.prepare_stream_disk_slice(xact_id).unwrap();
+    let mut disk_slice1 = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
     table
         .flush_stream_disk_slice(xact_id, &mut disk_slice1)
         .await
@@ -797,7 +797,7 @@ async fn test_streaming_begin_flush_commit_end_flush_multiple() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let mut disk_slice2 = table.prepare_stream_disk_slice(xact_id).unwrap();
+    let mut disk_slice2 = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
     table
         .flush_stream_disk_slice(xact_id, &mut disk_slice2)
         .await
@@ -883,7 +883,7 @@ async fn test_streaming_begin_flush_commit_delete_end_flush() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let mut disk_slice = table.prepare_stream_disk_slice(xact_id).unwrap();
+    let mut disk_slice = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
     table
         .flush_stream_disk_slice(xact_id, &mut disk_slice)
         .await
@@ -921,7 +921,9 @@ async fn test_streaming_begin_flush_commit_delete_end_flush() {
         .await
         .unwrap();
 
-    let mut disk_slice2 = table.prepare_stream_disk_slice(xact_id2).unwrap();
+    let mut disk_slice2 = table
+        .prepare_stream_disk_slice(xact_id2, Some(lsn2))
+        .unwrap();
     table
         .flush_stream_disk_slice(xact_id2, &mut disk_slice2)
         .await
@@ -968,6 +970,7 @@ async fn test_streaming_begin_flush_abort_end_flush() {
     table.register_table_notify(event_completion_tx).await;
 
     let xact_id = 1;
+    let lsn = 1;
 
     // Append a row to streaming mem slice
     let row = test_row(1, "A", 20);
@@ -975,7 +978,7 @@ async fn test_streaming_begin_flush_abort_end_flush() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let mut disk_slice = table.prepare_stream_disk_slice(xact_id).unwrap();
+    let mut disk_slice = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
     table
         .flush_stream_disk_slice(xact_id, &mut disk_slice)
         .await
@@ -1013,6 +1016,7 @@ async fn test_streaming_begin_flush_abort_end_flush_multiple() {
     table.register_table_notify(event_completion_tx).await;
 
     let xact_id = 1;
+    let lsn = 1;
 
     // Append a row to streaming mem slice
     let row1 = test_row(1, "A", 20);
@@ -1022,13 +1026,13 @@ async fn test_streaming_begin_flush_abort_end_flush_multiple() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let mut disk_slice1 = table.prepare_stream_disk_slice(xact_id).unwrap();
+    let mut disk_slice1 = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
     table
         .flush_stream_disk_slice(xact_id, &mut disk_slice1)
         .await
         .unwrap();
 
-    let mut disk_slice2 = table.prepare_stream_disk_slice(xact_id).unwrap();
+    let mut disk_slice2 = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
     table
         .flush_stream_disk_slice(xact_id, &mut disk_slice2)
         .await
