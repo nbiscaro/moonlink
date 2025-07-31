@@ -1,6 +1,7 @@
 use super::*;
 use crate::storage::cache::object_storage::base_cache::{CacheEntry, CacheTrait, FileMetadata};
 use crate::storage::index::cache_utils as index_cache_utils;
+use crate::storage::mooncake_table::data_batches::InMemoryBatch;
 use crate::storage::mooncake_table::DiskFileEntry;
 use crate::storage::storage_utils::{ProcessedDeletionRecord, TableUniqueFileId};
 use fastbloom::BloomFilter;
@@ -21,7 +22,7 @@ pub(super) struct TransactionStreamState {
     /// Both in memory and on disk indices for this transaction.
     stream_indices: MooncakeIndex,
     flushed_files: hashbrown::HashMap<MooncakeDataFileRef, DiskFileEntry>,
-    new_record_batches: Vec<(u64, Arc<RecordBatch>)>,
+    new_record_batches: hashbrown::HashMap<u64, InMemoryBatch>,
     status: TransactionStreamStatus,
     /// Number of pending flushes for this transaction.
     /// Only safe to remove transaction stream state when there are no pending flushes.
@@ -91,7 +92,7 @@ impl TransactionStreamState {
             index_bloom_filter: BloomFilter::with_num_bits(1 << 24).expected_items(1_000_000),
             stream_indices: MooncakeIndex::new(),
             flushed_files: hashbrown::HashMap::new(),
-            new_record_batches: Vec::new(),
+            new_record_batches: hashbrown::HashMap::new(),
             status: TransactionStreamStatus::Pending,
             pending_flush_count: 0,
         }
@@ -171,34 +172,63 @@ impl MooncakeTable {
             {
                 return;
             }
-            // Delete from stream flushed files
+            // Delete from stream state
             let matches = stream_state.stream_indices.find_record(&record).await;
             if !matches.is_empty() {
                 for loc in matches {
-                    let RecordLocation::DiskFile(file_id, row_id) = loc else {
-                        panic!("Unexpected record location: {record:?}");
-                    };
-                    let (file, disk_file_entry) = stream_state
-                        .flushed_files
-                        .get_key_value_mut(&file_id)
-                        .expect("missing disk file");
-                    if disk_file_entry.batch_deletion_vector.is_deleted(row_id) {
-                        continue;
-                    }
-                    if record.row_identity.is_none()
-                        || record
-                            .row_identity
-                            .as_ref()
-                            .unwrap()
-                            .equals_parquet_at_offset(file.file_path(), row_id, &metadata_identity)
-                            .await
-                    {
-                        stream_state.local_deletions.push(ProcessedDeletionRecord {
-                            pos: loc,
-                            lsn: record.lsn,
-                        });
-                        disk_file_entry.batch_deletion_vector.delete_row(row_id);
-                        return;
+                    match loc {
+                        RecordLocation::MemoryBatch(batch_id, row_id) => {
+                            if stream_state
+                                .new_record_batches
+                                .get(&batch_id)
+                                .expect("missing batch")
+                                .deletions
+                                .is_deleted(row_id)
+                            {
+                                continue;
+                            }
+                            // Push the deletion record to stream state
+                            stream_state.local_deletions.push(ProcessedDeletionRecord {
+                                pos: loc,
+                                lsn: record.lsn,
+                            });
+                            // Mark the row as deleted in the batch
+                            stream_state
+                                .new_record_batches
+                                .get_mut(&batch_id)
+                                .unwrap()
+                                .deletions
+                                .delete_row(row_id);
+                            return;
+                        }
+                        RecordLocation::DiskFile(file_id, row_id) => {
+                            let (file, disk_file_entry) = stream_state
+                                .flushed_files
+                                .get_key_value_mut(&file_id)
+                                .expect("missing disk file");
+                            if disk_file_entry.batch_deletion_vector.is_deleted(row_id) {
+                                continue;
+                            }
+                            if record.row_identity.is_none()
+                                || record
+                                    .row_identity
+                                    .as_ref()
+                                    .unwrap()
+                                    .equals_parquet_at_offset(
+                                        file.file_path(),
+                                        row_id,
+                                        &metadata_identity,
+                                    )
+                                    .await
+                            {
+                                stream_state.local_deletions.push(ProcessedDeletionRecord {
+                                    pos: loc,
+                                    lsn: record.lsn,
+                                });
+                                disk_file_entry.batch_deletion_vector.delete_row(row_id);
+                                return;
+                            }
+                        }
                     }
                 }
             }
@@ -257,16 +287,19 @@ impl MooncakeTable {
 
         // Add filtered record batches to stream state
         // We filter here since in the stream case we delete from the current mem slice directly instead of adding to `new_deletions`
-        let (_, batches, index) = stream_state.mem_slice.drain()?;
-        stream_state
-            .new_record_batches
-            .extend(batches.iter().filter_map(|b| {
-                b.batch
-                    .get_filtered_batch()
-                    .ok()
-                    .flatten()
-                    .map(|filtered_batch| (b.id, Arc::new(filtered_batch)))
-            }));
+        let (_, mut batches, index) = stream_state.mem_slice.drain()?;
+        for batch in batches.iter_mut() {
+            let filtered_batch = batch.batch.get_filtered_batch()?;
+            if let Some(filtered_batch) = filtered_batch {
+                stream_state.new_record_batches.insert(
+                    batch.id,
+                    InMemoryBatch {
+                        data: Some(Arc::new(filtered_batch)),
+                        deletions: BatchDeletionVector::default(),
+                    },
+                );
+            }
+        }
 
         // Add mem index to stream state
         let index = Arc::new(index);
@@ -358,11 +391,16 @@ impl MooncakeTable {
         }
         // Remove now flushed in mem batches
         for batch in disk_slice.input_batches().iter() {
-            stream_state.new_record_batches.retain(|b| b.0 != batch.id);
+            stream_state.new_record_batches.remove(&batch.id);
         }
         // Remove now flushed in mem indices
         let old_index = disk_slice.old_index();
         stream_state.stream_indices.delete_memory_index(old_index);
+
+        // Remap local in mem deletions to disk deletions
+        for deletion in stream_state.local_deletions.iter_mut() {
+            disk_slice.remap_deletion_if_needed(deletion);
+        }
     }
 
     pub async fn flush_stream(&mut self, xact_id: u32, lsn: Option<u64>) -> Result<()> {
@@ -392,24 +430,29 @@ impl MooncakeTable {
             .expect("Stream state not found for xact_id: {xact_id}");
 
         // Add state from current mem slice to stream first
-        let (_, batches, index) = stream_state.mem_slice.drain()?;
-        stream_state
-            .new_record_batches
-            .extend(batches.iter().filter_map(|b| {
-                b.batch
-                    .get_filtered_batch()
-                    .ok()
-                    .flatten()
-                    .map(|filtered_batch| (b.id, Arc::new(filtered_batch)))
-            }));
+        let (_, mut batches, index) = stream_state.mem_slice.drain()?;
+        for batch in batches.iter_mut() {
+            let filtered_batch = batch.batch.get_filtered_batch()?;
+            if let Some(filtered_batch) = filtered_batch {
+                stream_state.new_record_batches.insert(
+                    batch.id,
+                    InMemoryBatch {
+                        data: Some(Arc::new(filtered_batch)),
+                        deletions: BatchDeletionVector::default(),
+                    },
+                );
+            }
+        }
         stream_state
             .stream_indices
             .insert_memory_index(Arc::new(index));
 
         // Add stream record batches to next snapshot task
-        self.next_snapshot_task
-            .new_record_batches
-            .extend(stream_state.new_record_batches.clone());
+        for (id, batch) in stream_state.new_record_batches.iter() {
+            self.next_snapshot_task
+                .new_record_batches
+                .push((*id, batch.data.as_ref().unwrap().clone()));
+        }
         // Add stream in mem indices to next snapshot task
         self.next_snapshot_task.new_mem_indices.extend(
             stream_state
