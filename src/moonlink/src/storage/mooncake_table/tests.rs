@@ -861,6 +861,71 @@ async fn test_streaming_begin_flush_commit_end_flush_multiple() {
 }
 
 #[tokio::test]
+async fn test_streaming_begin_flush_delete_commit_end_flush() {
+    let context = TestContext::new("streaming_begin_flush_commit_delete_end_flush");
+    let mut table = test_table(
+        &context,
+        "streaming_begin_flush_commit_delete_end_flush",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id = 1;
+    let lsn = 1;
+
+    // Append rows to streaming mem slice
+    let row1 = test_row(1, "A", 20);
+    table.append_in_stream_batch(row1, xact_id).unwrap();
+    let row2 = test_row(2, "B", 21);
+    table.append_in_stream_batch(row2.clone(), xact_id).unwrap();
+
+    // Begin the flush
+    // This will drain the mem slice and add its relevant state to the stream state
+    let mut disk_slice = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
+    table
+        .flush_stream_disk_slice(xact_id, &mut disk_slice)
+        .await
+        .unwrap();
+
+    // Delete the row that is still flushing
+    table.delete_in_stream_batch(row2, xact_id).await;
+
+    // Finish the flush
+    table.apply_stream_flush_result(xact_id, disk_slice);
+
+    // Commit the transaction
+    table
+        .commit_transaction_stream(xact_id, lsn + 1)
+        .await
+        .unwrap();
+
+    // Make sure we only have one row in the snapshot
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+
+    // Read the snapshot
+    {
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths,
+            puffin_cache_handles,
+            position_deletes,
+            deletion_vectors,
+            ..
+        } = snapshot.request_read().await.unwrap();
+        verify_files_and_deletions(
+            get_data_files_for_read(&data_file_paths).as_slice(),
+            get_deletion_puffin_files_for_read(&puffin_cache_handles).as_slice(),
+            position_deletes,
+            deletion_vectors,
+            &[1],
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn test_streaming_begin_flush_commit_delete_end_flush() {
     let context = TestContext::new("streaming_begin_flush_commit_delete_end_flush");
     let mut table = test_table(
