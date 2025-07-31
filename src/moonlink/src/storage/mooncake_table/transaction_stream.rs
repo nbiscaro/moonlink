@@ -373,17 +373,25 @@ impl MooncakeTable {
         stream_state.stream_indices.delete_memory_index(old_index);
     }
 
+    pub async fn flush_stream(&mut self, xact_id: u32, lsn: Option<u64>) -> Result<()> {
+        let mut disk_slice = self.prepare_stream_disk_slice(xact_id)?;
+        self.flush_stream_disk_slice(xact_id, &mut disk_slice)
+            .await?;
+        if let Some(lsn) = lsn {
+            self.next_snapshot_task.new_flush_lsn = Some(lsn);
+        }
+        self.apply_stream_flush_result(xact_id, disk_slice);
+
+        Ok(())
+    }
+
     /// Commit a transaction stream.
     /// Flushes any remaining rows from stream mem slice
     /// Adds all in mem batches and indices to next snapshot task
     /// Updates deletion records
     /// Enqueues `TransactionStreamOutput::Commit` for snapshot task
     pub async fn commit_transaction_stream(&mut self, xact_id: u32, lsn: u64) -> Result<()> {
-        let mut disk_slice = self.prepare_stream_disk_slice(xact_id)?;
-        self.flush_stream_disk_slice(xact_id, &mut disk_slice)
-            .await?;
-        self.next_snapshot_task.new_flush_lsn = Some(lsn);
-        self.apply_stream_flush_result(xact_id, disk_slice);
+        self.flush_stream(xact_id, Some(lsn)).await?;
 
         // Now remove and process the state
         assert!(
