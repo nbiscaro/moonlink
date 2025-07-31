@@ -178,12 +178,25 @@ impl MooncakeTable {
                 for loc in matches {
                     match loc {
                         RecordLocation::MemoryBatch(batch_id, row_id) => {
-                            if stream_state
+                            let batch = stream_state
                                 .new_record_batches
                                 .get(&batch_id)
-                                .expect("missing batch")
-                                .deletions
-                                .is_deleted(row_id)
+                                .expect("Attempting to delete batch that doesn't exist");
+
+                            if batch.deletions.is_deleted(row_id) {
+                                continue;
+                            }
+                            if record.row_identity.is_some()
+                                && metadata_identity.requires_identity_check_in_mem_slice()
+                                && !record
+                                    .row_identity
+                                    .as_ref()
+                                    .unwrap()
+                                    .equals_record_batch_at_offset(
+                                        batch.data.as_ref().unwrap(),
+                                        row_id,
+                                        &metadata_identity,
+                                    )
                             {
                                 continue;
                             }
