@@ -52,9 +52,7 @@ impl BatchDeletionVector {
     #[must_use]
     pub(crate) fn delete_row(&mut self, row_idx: usize) -> bool {
         ma::assert_gt!(self.max_rows, 0);
-        println!("max rows is: {}", self.max_rows);
 
-        // CRITICAL ASSERTION: Catch the actual bug - deletion records with row_ids beyond deletion vector capacity
         assert!(
             row_idx < self.max_rows,
             "Deletion vector capacity exceeded: trying to delete row_idx {} but deletion vector only has capacity for {} rows. \

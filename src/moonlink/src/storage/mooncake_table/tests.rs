@@ -1141,3 +1141,39 @@ async fn test_streaming_begin_flush_abort_end_flush_multiple() {
         assert_eq!(data_file_paths.len(), 0);
     }
 }
+
+#[tokio::test]
+async fn test_streaming_commit_with_unflushed_data() {
+    let context = TestContext::new("streaming_commit_with_unflushed_data");
+    let mut table = test_table(
+        &context,
+        "streaming_commit_with_unflushed_data",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id = 1;
+    let lsn = 1;
+
+    // Append rows to streaming mem slice but don't flush them
+    let row1 = test_row(1, "A", 20);
+    table.append_in_stream_batch(row1, xact_id).unwrap();
+    let row2 = test_row(2, "B", 21);
+    table.append_in_stream_batch(row2, xact_id).unwrap();
+
+    // Commit the transaction directly without flushing first
+    table.commit_transaction_stream(xact_id, lsn).await.unwrap();
+
+    // Verify the data is still accessible after commit
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+
+    let mut snapshot = table.snapshot.write().await;
+    let SnapshotReadOutput {
+        data_file_paths, ..
+    } = snapshot.request_read().await.unwrap();
+
+    // Should have the data from the unflushed mem slice
+    verify_file_contents(&data_file_paths[0].get_file_path(), &[1, 2], Some(2));
+}
