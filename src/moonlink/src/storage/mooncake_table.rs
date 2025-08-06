@@ -206,8 +206,8 @@ pub struct SnapshotTask {
     new_disk_slices: Vec<DiskSliceWriter>,
     disk_file_lsn_map: HashMap<FileId, u64>,
     new_deletions: Vec<RawDeletionRecord>,
-    /// Pair of <batch id, record batch>.
-    new_record_batches: Vec<(u64, Arc<RecordBatch>)>,
+    /// Pair of <batch id, record batch, optional deletion vector for streaming batches>.
+    new_record_batches: Vec<(u64, Arc<RecordBatch>, Option<BatchDeletionVector>)>,
     new_rows: Option<SharedRowBufferSnapshot>,
     new_mem_indices: Vec<Arc<MemIndex>>,
     /// Assigned (non-zero) after a commit event.
@@ -727,7 +727,9 @@ impl MooncakeTable {
         let lookup_key = self.metadata.identity.get_lookup_key(&row);
         let identity_for_key = self.metadata.identity.extract_identity_for_key(&row);
         if let Some(batch) = self.mem_slice.append(lookup_key, row, identity_for_key)? {
-            self.next_snapshot_task.new_record_batches.push(batch);
+            self.next_snapshot_task
+                .new_record_batches
+                .push((batch.0, batch.1, None));
         }
         Ok(())
     }
@@ -799,7 +801,7 @@ impl MooncakeTable {
         let index = Arc::new(index);
         if let Some(task) = snapshot_task {
             if let Some(batch) = new_batch {
-                task.new_record_batches.push(batch);
+                task.new_record_batches.push((batch.0, batch.1, None));
             }
             task.new_mem_indices.push(index.clone());
         }

@@ -312,17 +312,13 @@ impl MooncakeTable {
         // We filter here since in the stream case we delete from the current mem slice directly instead of adding to `new_deletions`
         let (_, mut batches, index) = stream_state.mem_slice.drain()?;
         for batch in batches.iter_mut() {
-            let filtered_batch = batch.batch.get_filtered_batch()?;
-            if let Some(filtered_batch) = filtered_batch {
-                let num_rows = filtered_batch.num_rows();
-                stream_state.new_record_batches.insert(
-                    batch.id,
-                    InMemoryBatch {
-                        data: Some(Arc::new(filtered_batch)),
-                        deletions: BatchDeletionVector::new(num_rows),
-                    },
-                );
-            }
+            stream_state.new_record_batches.insert(
+                batch.id,
+                InMemoryBatch {
+                    data: batch.batch.data.clone(),
+                    deletions: batch.batch.deletions.clone(),
+                },
+            );
         }
 
         // Add mem index to stream state
@@ -457,17 +453,13 @@ impl MooncakeTable {
         // Add state from current mem slice to stream first
         let (_, mut batches, index) = stream_state.mem_slice.drain()?;
         for batch in batches.iter_mut() {
-            let filtered_batch = batch.batch.get_filtered_batch()?;
-            if let Some(filtered_batch) = filtered_batch {
-                let num_rows = filtered_batch.num_rows();
-                stream_state.new_record_batches.insert(
-                    batch.id,
-                    InMemoryBatch {
-                        data: Some(Arc::new(filtered_batch)),
-                        deletions: BatchDeletionVector::new(num_rows),
-                    },
-                );
-            }
+            stream_state.new_record_batches.insert(
+                batch.id,
+                InMemoryBatch {
+                    data: batch.batch.data.clone(),
+                    deletions: batch.batch.deletions.clone(),
+                },
+            );
         }
         stream_state
             .stream_indices
@@ -475,9 +467,11 @@ impl MooncakeTable {
 
         // Add stream record batches to next snapshot task
         for (id, batch) in stream_state.new_record_batches.iter() {
-            self.next_snapshot_task
-                .new_record_batches
-                .push((*id, batch.data.as_ref().unwrap().clone()));
+            self.next_snapshot_task.new_record_batches.push((
+                *id,
+                batch.data.as_ref().unwrap().clone(),
+                Some(batch.deletions.clone()),
+            ));
         }
         // Add stream in mem indices to next snapshot task
         self.next_snapshot_task.new_mem_indices.extend(

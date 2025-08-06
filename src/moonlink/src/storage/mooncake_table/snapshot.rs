@@ -619,13 +619,10 @@ impl SnapshotTableState {
     }
 
     fn finalize_batches(&mut self, task: &mut SnapshotTask) {
-        if task.new_record_batches.is_empty() {
-            return;
-        }
-
         let incoming = take(&mut task.new_record_batches);
-        let (streaming_batches, mut non_streaming_batches): (Vec<_>, Vec<_>) =
-            incoming.into_iter().partition(|(id, _)| *id < (1u64 << 63));
+        let (streaming_batches, mut non_streaming_batches): (Vec<_>, Vec<_>) = incoming
+            .into_iter()
+            .partition(|(id, _, _)| *id < (1u64 << 63));
 
         if !non_streaming_batches.is_empty() {
             // close previously‐open batch
@@ -647,17 +644,22 @@ impl SnapshotTableState {
 
         // Add completed batches
         // Assert that no incoming batch ID is already present in the map.
-        for (id, rb) in streaming_batches
+        for (id, rb, deletion_vector) in streaming_batches
             .into_iter()
             .chain(non_streaming_batches.into_iter())
         {
+            let deletions = match deletion_vector {
+                Some(dv) => dv, // Use the deletion vector from streaming transaction
+                None => BatchDeletionVector::new(rb.num_rows()), // Create fresh deletion vector for non-streaming
+            };
+
             assert!(
                 self.batches
                     .insert(
                         id,
                         InMemoryBatch {
                             data: Some(rb.clone()),
-                            deletions: BatchDeletionVector::new(rb.num_rows()),
+                            deletions,
                         }
                     )
                     .is_none(),
