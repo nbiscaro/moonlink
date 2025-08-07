@@ -449,7 +449,7 @@ impl SnapshotTableState {
         &mut self,
         mut task: SnapshotTask,
         opt: SnapshotOption,
-        has_pending_flushes: bool,
+        min_pending_flush_lsn: u64,
     ) -> MooncakeSnapshotOutput {
         // Validate mooncake table operation invariants.
         self.validate_mooncake_table_invariants(&task, &opt);
@@ -563,13 +563,13 @@ impl SnapshotTableState {
             && (flush_by_new_files_or_maintenance || flush_by_deletion);
 
         // TODO(hjiang): When there's only schema evolution, we should also flush even no flush.
+        let flush_lsn = self.current_snapshot.flush_lsn.unwrap_or(0);
         if !opt.skip_iceberg_snapshot
             && (force_empty_iceberg_payload || flush_by_table_write)
-            && !has_pending_flushes
+            && flush_lsn < min_pending_flush_lsn
         {
             // Getting persistable committed deletion logs is not cheap, which requires iterating through all logs,
             // so we only aggregate when there's committed deletion.
-            let flush_lsn = self.current_snapshot.flush_lsn.unwrap_or(0);
             let committed_deletion_logs = self.aggregate_committed_deletion_logs(flush_lsn);
             committed_deletion_logs.validate();
 

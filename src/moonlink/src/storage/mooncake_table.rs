@@ -946,14 +946,14 @@ impl MooncakeTable {
 
         let cur_snapshot = self.snapshot.clone();
 
-        let has_pending_flushes = !self.pending_flush_lsns.is_empty();
+        let min_pending_flush_lsn = self.get_min_pending_flush_lsn();
         // Create a detached task, whose completion will be notified separately.
         tokio::task::spawn(
             Self::create_snapshot_async(
                 cur_snapshot,
                 next_snapshot_task,
                 opt,
-                has_pending_flushes,
+                min_pending_flush_lsn,
                 self.table_notify.as_ref().unwrap().clone(),
             )
             .instrument(info_span!("create_snapshot_async")),
@@ -1215,14 +1215,14 @@ impl MooncakeTable {
         snapshot: Arc<RwLock<SnapshotTableState>>,
         next_snapshot_task: SnapshotTask,
         mut opt: SnapshotOption,
-        has_pending_flushes: bool,
+        min_pending_flush_lsn: u64,
         table_notify: Sender<TableEvent>,
     ) {
         let uuid = std::mem::take(&mut opt.uuid);
         let snapshot_result = snapshot
             .write()
             .await
-            .update_snapshot(next_snapshot_task, opt, has_pending_flushes)
+            .update_snapshot(next_snapshot_task, opt, min_pending_flush_lsn)
             .await;
         table_notify
             .send(TableEvent::MooncakeTableSnapshotResult {
