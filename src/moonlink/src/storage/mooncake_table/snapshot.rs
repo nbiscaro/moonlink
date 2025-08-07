@@ -719,6 +719,7 @@ impl SnapshotTableState {
                     slice.remap_deletion_if_needed(deletion)
                 {
                     // Find the disk file entry and apply the deletion
+                    // Precondition: all new data files have been reflected to disk file map
                     for (file_ref, disk_entry) in self.current_snapshot.disk_files.iter_mut() {
                         if file_ref.file_id() == file_id {
                             assert!(disk_entry.batch_deletion_vector.delete_row(row_idx));
