@@ -11,7 +11,7 @@ use arrow::array::{ArrayRef, RecordBatch};
 use arrow_schema::Schema;
 use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct InMemoryBatch {
     pub(super) data: Option<Arc<RecordBatch>>,
     pub(super) deletions: BatchDeletionVector,
@@ -45,7 +45,7 @@ impl InMemoryBatch {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct BatchEntry {
     pub(super) id: u64,
     pub(super) batch: InMemoryBatch,

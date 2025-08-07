@@ -449,6 +449,7 @@ impl SnapshotTableState {
         &mut self,
         mut task: SnapshotTask,
         opt: SnapshotOption,
+        has_pending_flushes: bool,
     ) -> MooncakeSnapshotOutput {
         // Validate mooncake table operation invariants.
         self.validate_mooncake_table_invariants(&task, &opt);
@@ -562,7 +563,10 @@ impl SnapshotTableState {
             && (flush_by_new_files_or_maintenance || flush_by_deletion);
 
         // TODO(hjiang): When there's only schema evolution, we should also flush even no flush.
-        if !opt.skip_iceberg_snapshot && (force_empty_iceberg_payload || flush_by_table_write) {
+        if !opt.skip_iceberg_snapshot
+            && (force_empty_iceberg_payload || flush_by_table_write)
+            && !has_pending_flushes
+        {
             // Getting persistable committed deletion logs is not cheap, which requires iterating through all logs,
             // so we only aggregate when there's committed deletion.
             let flush_lsn = self.current_snapshot.flush_lsn.unwrap_or(0);
@@ -701,21 +705,34 @@ impl SnapshotTableState {
             }
 
             // remap deletions written *after* this slice’s LSN
+            // We set to write_lsn - 1 to maintain consistency with deletion LSNs from the streaming case.
             let cut = self.committed_deletion_log.partition_point(|d| {
                 d.lsn
-                    <= write_lsn.expect(
+                    < write_lsn.expect(
                         "Critical: LSN is None after it should have been updated by commit process",
-                    )
+                    ) - 1
             });
 
-            self.committed_deletion_log[cut..]
-                .iter_mut()
-                .for_each(|d| slice.remap_deletion_if_needed(d));
+            for deletion in self.committed_deletion_log[cut..].iter_mut() {
+                if let Some(RecordLocation::DiskFile(file_id, row_idx)) =
+                    slice.remap_deletion_if_needed(deletion)
+                {
+                    // Find the disk file entry and apply the deletion
+                    for (file_ref, disk_entry) in self.current_snapshot.disk_files.iter_mut() {
+                        if file_ref.file_id() == file_id {
+                            assert!(disk_entry.batch_deletion_vector.delete_row(row_idx));
+                            break;
+                        }
+                    }
+                }
+            }
 
             self.uncommitted_deletion_log
                 .iter_mut()
                 .flatten()
-                .for_each(|d| slice.remap_deletion_if_needed(d));
+                .for_each(|d| {
+                    slice.remap_deletion_if_needed(d);
+                });
 
             // swap indices and drop in-memory batches that were flushed
             if let Some(on_disk_index) = slice.take_index() {

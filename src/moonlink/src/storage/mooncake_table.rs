@@ -58,7 +58,7 @@ use delete_vector::BatchDeletionVector;
 pub(crate) use disk_slice::DiskSliceWriter;
 use mem_slice::MemSlice;
 pub(crate) use snapshot::{PuffinDeletionBlobAtRead, SnapshotTableState};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use table_snapshot::{IcebergSnapshotImportResult, IcebergSnapshotIndexMergeResult};
@@ -446,6 +446,9 @@ pub struct MooncakeTable {
 
     /// WAL manager, used to persist WAL events.
     wal_manager: WalManager,
+
+    /// LSN of pending flushes.
+    pub pending_flush_lsns: BTreeSet<u64>,
 }
 
 impl MooncakeTable {
@@ -541,6 +544,7 @@ impl MooncakeTable {
             last_iceberg_snapshot_lsn,
             table_notify: None,
             wal_manager,
+            pending_flush_lsns: BTreeSet::new(),
         })
     }
 
@@ -687,6 +691,11 @@ impl MooncakeTable {
         self.last_iceberg_snapshot_lsn
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_iceberg_snapshot_lsn(&mut self, lsn: u64) {
+        self.last_iceberg_snapshot_lsn = Some(lsn);
+    }
+
     pub(crate) fn get_state_for_reader(
         &self,
     ) -> (Arc<RwLock<SnapshotTableState>>, watch::Receiver<u64>) {
@@ -754,56 +763,112 @@ impl MooncakeTable {
         self.mem_slice.get_num_rows() >= self.metadata.config.mem_slice_size
     }
 
-    /// Flush `mem_slice` into parquet files and return the resulting `DiskSliceWriter`.
-    ///
-    /// When `snapshot_task` is provided, new batches and indices are recorded so
-    /// that they can be included in the next snapshot.  The `lsn` parameter
-    /// specifies the commit LSN for the flushed data.  When `lsn` is `None` the
-    /// caller is responsible for setting the final LSN on the returned
-    /// `DiskSliceWriter`.
-    async fn flush_mem_slice(
-        mem_slice: &mut MemSlice,
-        metadata: &Arc<TableMetadata>,
-        next_file_id: u32,
-        lsn: Option<u64>,
-        snapshot_task: Option<&mut SnapshotTask>,
-    ) -> Result<DiskSliceWriter> {
+    /// Drains the current mem slice and prepares a disk slice for flushing.
+    /// Adds current mem slice batches and indices to `next_snapshot_task`.
+    fn prepare_disk_slice(&mut self, lsn: u64) -> Result<DiskSliceWriter> {
         // Finalize the current batch (if needed)
-        let (new_batch, batches, index) = mem_slice.drain().unwrap();
+        let (new_batch, batches, index) = self.mem_slice.drain()?;
 
         let index = Arc::new(index);
-        if let Some(task) = snapshot_task {
-            if let Some(batch) = new_batch {
-                task.new_record_batches.push((batch.0, batch.1, None));
-            }
-            task.new_mem_indices.push(index.clone());
+        if let Some(batch) = new_batch {
+            self.next_snapshot_task
+                .new_record_batches
+                .push((batch.0, batch.1, None));
         }
+        self.next_snapshot_task.new_mem_indices.push(index.clone());
 
-        let path = metadata.path.clone();
-        let parquet_flush_threshold_size = metadata.config.disk_slice_parquet_file_size;
+        let path = self.metadata.path.clone();
+        let parquet_flush_threshold_size = self.metadata.config.disk_slice_parquet_file_size;
+        let next_file_id = self.next_file_id;
+        self.next_file_id += 1;
 
-        let mut disk_slice = DiskSliceWriter::new(
-            metadata.schema.clone(),
+        let disk_slice = DiskSliceWriter::new(
+            self.metadata.schema.clone(),
             path,
             batches,
-            lsn,
+            Some(lsn),
             next_file_id,
             index,
             parquet_flush_threshold_size,
         );
 
-        disk_slice.write().await?;
         Ok(disk_slice)
     }
 
-    // UNDONE(BATCH_INSERT):
-    // Flush uncommitted batches from big batch insert, whether how much record batch there is.
-    //
-    // This function
-    // - tracks all record batches by current snapshot task
-    // - persists all full batch records to local filesystem
-    pub async fn flush(&mut self, lsn: u64) -> Result<()> {
-        // Sanith check flush LSN doesn't regress.
+    /// Flushes the disk slice for the transaction.
+    fn flush_disk_slice(
+        &mut self,
+        disk_slice: &mut DiskSliceWriter,
+        table_notify_tx: Sender<TableEvent>,
+        xact_id: Option<u32>,
+    ) {
+        let path = self.metadata.path.clone();
+        let schema = self.metadata.schema.clone();
+        let batches = disk_slice.take_input_batches();
+        let lsn = disk_slice.lsn();
+        let next_file_id = disk_slice.table_auto_incr_id;
+        let old_index = disk_slice.old_index().clone();
+        let parquet_flush_threshold_size = self.metadata.config.disk_slice_parquet_file_size;
+
+        if let Some(lsn) = lsn {
+            self.insert_pending_flush_lsn(lsn);
+        } else {
+            assert!(
+                xact_id.is_some(),
+                "LSN should be none for non streaming flush"
+            );
+        }
+
+        tokio::task::spawn(async move {
+            let mut disk_slice_clone = DiskSliceWriter::new(
+                schema,
+                path,
+                batches,
+                lsn,
+                next_file_id,
+                old_index,
+                parquet_flush_threshold_size,
+            );
+            let flush_result = disk_slice_clone.write().await;
+            match flush_result {
+                Ok(()) => {
+                    table_notify_tx
+                        .send(TableEvent::FlushResult {
+                            xact_id,
+                            flush_result: Some(Ok(disk_slice_clone)),
+                        })
+                        .await
+                        .unwrap();
+                }
+                Err(e) => {
+                    table_notify_tx
+                        .send(TableEvent::FlushResult {
+                            xact_id,
+                            flush_result: Some(Err(e)),
+                        })
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+    }
+
+    /// Applies the result of a flush to the snapshot task.
+    /// Adds the disk slice to `next_snapshot_task`.
+    pub fn apply_flush_result(&mut self, disk_slice: DiskSliceWriter) {
+        let lsn = disk_slice
+            .lsn()
+            .expect("LSN should never be none for non streaming flush");
+        self.pending_flush_lsns.remove(&lsn);
+        self.set_next_flush_lsn(lsn);
+        self.next_snapshot_task.new_disk_slices.push(disk_slice);
+    }
+
+    /// Drains the current mem slice and create a disk slice.
+    /// Flushes the disk slice.
+    /// Adds the disk slice to `next_snapshot_task`.
+    pub fn flush(&mut self, lsn: u64) -> Result<()> {
+        // Sanity check flush LSN doesn't regress.
         assert!(
             self.next_snapshot_task.new_flush_lsn.is_none()
                 || self.next_snapshot_task.new_flush_lsn.unwrap() <= lsn,
@@ -811,25 +876,57 @@ impl MooncakeTable {
             self.next_snapshot_task.new_flush_lsn,
             lsn,
         );
-        self.next_snapshot_task.new_flush_lsn = Some(lsn);
 
-        if self.mem_slice.is_empty() {
+        let table_notify_tx = self.table_notify.as_ref().unwrap().clone();
+
+        if self.mem_slice.is_empty() || self.pending_flush_lsns.contains(&lsn) {
+            self.set_next_flush_lsn(lsn);
+            tokio::task::spawn(async move {
+                table_notify_tx
+                    .send(TableEvent::FlushResult {
+                        xact_id: None,
+                        flush_result: None,
+                    })
+                    .await
+                    .unwrap();
+            });
             return Ok(());
         }
 
-        let next_file_id = self.next_file_id;
-        self.next_file_id += 1;
-        let disk_slice = Self::flush_mem_slice(
-            &mut self.mem_slice,
-            &self.metadata,
-            next_file_id,
-            Some(lsn),
-            Some(&mut self.next_snapshot_task),
-        )
-        .await?;
-        self.next_snapshot_task.new_disk_slices.push(disk_slice);
+        let mut disk_slice = self.prepare_disk_slice(lsn)?;
+
+        self.flush_disk_slice(&mut disk_slice, table_notify_tx, None);
 
         Ok(())
+    }
+
+    fn set_next_flush_lsn(&mut self, lsn: u64) {
+        let min_pending_lsn = self.get_min_pending_flush_lsn();
+        if lsn < min_pending_lsn {
+            self.next_snapshot_task.new_flush_lsn = Some(lsn);
+        }
+    }
+
+    pub fn get_min_pending_flush_lsn(&self) -> u64 {
+        self.pending_flush_lsns
+            .iter()
+            .next()
+            .copied()
+            .unwrap_or(u64::MAX)
+    }
+
+    pub fn insert_pending_flush_lsn(&mut self, lsn: u64) {
+        assert!(
+            self.pending_flush_lsns.insert(lsn),
+            "LSN {lsn} already in pending flush LSNs"
+        );
+    }
+
+    pub fn remove_pending_flush_lsn(&mut self, lsn: u64) {
+        assert!(
+            self.pending_flush_lsns.remove(&lsn),
+            "LSN {lsn} not found in pending flush LSNs"
+        );
     }
 
     // Create a snapshot of the last committed version, return current snapshot's version and payload to perform iceberg snapshot.
@@ -843,14 +940,20 @@ impl MooncakeTable {
 
         // Re-initialize mooncake table fields.
         self.next_snapshot_task = SnapshotTask::new(self.metadata.config.clone());
+        // Carry forward the commit baseline
+        // This is important if we have a pending flush that will be added to the next snapshot task.
+        self.next_snapshot_task.new_commit_lsn = next_snapshot_task.new_commit_lsn;
 
         let cur_snapshot = self.snapshot.clone();
+
+        let has_pending_flushes = !self.pending_flush_lsns.is_empty();
         // Create a detached task, whose completion will be notified separately.
         tokio::task::spawn(
             Self::create_snapshot_async(
                 cur_snapshot,
                 next_snapshot_task,
                 opt,
+                has_pending_flushes,
                 self.table_notify.as_ref().unwrap().clone(),
             )
             .instrument(info_span!("create_snapshot_async")),
@@ -1112,13 +1215,14 @@ impl MooncakeTable {
         snapshot: Arc<RwLock<SnapshotTableState>>,
         next_snapshot_task: SnapshotTask,
         mut opt: SnapshotOption,
+        has_pending_flushes: bool,
         table_notify: Sender<TableEvent>,
     ) {
         let uuid = std::mem::take(&mut opt.uuid);
         let snapshot_result = snapshot
             .write()
             .await
-            .update_snapshot(next_snapshot_task, opt)
+            .update_snapshot(next_snapshot_task, opt, has_pending_flushes)
             .await;
         table_notify
             .send(TableEvent::MooncakeTableSnapshotResult {

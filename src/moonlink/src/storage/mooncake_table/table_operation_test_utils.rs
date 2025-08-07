@@ -5,6 +5,7 @@ use tokio::sync::mpsc::Receiver;
 #[cfg(test)]
 use crate::row::MoonlinkRow;
 use crate::storage::io_utils;
+use crate::storage::mooncake_table::disk_slice::DiskSliceWriter;
 use crate::storage::mooncake_table::{
     AlterTableRequest, DataCompactionPayload, DataCompactionResult, FileIndiceMergePayload,
     FileIndiceMergeResult, IcebergSnapshotPayload, IcebergSnapshotResult, MaintenanceOption,
@@ -15,6 +16,7 @@ use crate::table_notify::{
 };
 use crate::{MooncakeTable, SnapshotReadOutput};
 use crate::{ReadState, Result};
+use tracing::{debug, error};
 
 /// ===============================
 /// Flush
@@ -24,11 +26,124 @@ use crate::{ReadState, Result};
 #[cfg(test)]
 pub(crate) async fn flush_table_and_sync(
     table: &mut MooncakeTable,
-    _receiver: &mut Receiver<TableEvent>,
+    receiver: &mut Receiver<TableEvent>,
     lsn: u64,
 ) -> Result<()> {
-    // TODO(Nolan): Use receiver to block wait until table flush finishes.
-    table.flush(lsn).await
+    table.flush(lsn).unwrap();
+    let flush_result = receiver.recv().await.unwrap();
+    match flush_result {
+        TableEvent::FlushResult {
+            xact_id: _,
+            flush_result,
+        } => match flush_result {
+            Some(Ok(disk_slice)) => {
+                table.apply_flush_result(disk_slice);
+            }
+            Some(Err(e)) => {
+                error!(error = ?e, "failed to flush disk slice");
+            }
+            None => {
+                debug!("Flush result is none, disk slice was empty");
+            }
+        },
+        _ => {
+            panic!("Expected FlushResult as first event, but got others.");
+        }
+    }
+    Ok(())
+}
+
+/// Flush mooncake, block wait its completion but do NOT apply the result.
+/// This leaves the LSN in pending_flush_lsns until apply_flush_result is called.
+#[cfg(test)]
+pub(crate) async fn flush_table_and_sync_no_apply(
+    table: &mut MooncakeTable,
+    receiver: &mut Receiver<TableEvent>,
+    lsn: u64,
+) -> Option<DiskSliceWriter> {
+    table.flush(lsn).unwrap();
+    let flush_result = receiver.recv().await.unwrap();
+    match flush_result {
+        TableEvent::FlushResult {
+            xact_id: _,
+            flush_result,
+        } => match flush_result {
+            Some(Ok(disk_slice)) => Some(disk_slice),
+            Some(Err(e)) => {
+                error!(error = ?e, "failed to flush disk slice");
+                None
+            }
+            None => {
+                debug!("Flush result is none, disk slice was empty");
+                None
+            }
+        },
+        _ => {
+            panic!("Expected FlushResult as first event, but got others.");
+        }
+    }
+}
+
+/// Flush mooncake, block wait its completion and reflect result to mooncake table.
+#[cfg(test)]
+pub(crate) async fn flush_stream_and_sync_no_apply(
+    table: &mut MooncakeTable,
+    receiver: &mut Receiver<TableEvent>,
+    xact_id: u32,
+    lsn: Option<u64>,
+) -> Option<DiskSliceWriter> {
+    table.flush_stream(xact_id, lsn).unwrap();
+    let flush_result = receiver.recv().await.unwrap();
+    match flush_result {
+        TableEvent::FlushResult {
+            xact_id: _,
+            flush_result,
+        } => match flush_result {
+            Some(Ok(disk_slice)) => Some(disk_slice),
+            Some(Err(e)) => {
+                error!(error = ?e, "failed to flush disk slice");
+                None
+            }
+            None => {
+                debug!("Flush result is none, disk slice was empty");
+                None
+            }
+        },
+        _ => {
+            panic!("Expected FlushResult as first event, but got others.");
+        }
+    }
+}
+
+/// Commit transaction stream, block wait its completion and reflect result to mooncake table.
+#[cfg(test)]
+pub(crate) async fn commit_transaction_stream_and_sync(
+    table: &mut MooncakeTable,
+    receiver: &mut Receiver<TableEvent>,
+    xact_id: u32,
+    lsn: u64,
+) {
+    table.commit_transaction_stream(xact_id, lsn).unwrap();
+    let flush_result = receiver.recv().await.unwrap();
+    match flush_result {
+        TableEvent::FlushResult {
+            xact_id: Some(xact_id),
+            flush_result,
+        } => match flush_result {
+            Some(Ok(disk_slice)) => {
+                table.apply_stream_flush_result(xact_id, disk_slice);
+            }
+            Some(Err(e)) => {
+                error!(error = ?e, "failed to flush disk slice");
+            }
+            None => {
+                debug!("Flush result is none, disk slice was empty");
+            }
+        },
+        _ => {
+            panic!("Expected FlushResult as first event, but got others.");
+        }
+    }
 }
 
 /// ===============================
@@ -153,7 +268,9 @@ pub(crate) async fn sync_mooncake_snapshot(
         panic!("Expected mooncake snapshot completion notification, but get others.");
     }
 }
-async fn sync_iceberg_snapshot(receiver: &mut Receiver<TableEvent>) -> IcebergSnapshotResult {
+pub(crate) async fn sync_iceberg_snapshot(
+    receiver: &mut Receiver<TableEvent>,
+) -> IcebergSnapshotResult {
     let notification = receiver.recv().await.unwrap();
     if let TableEvent::IcebergSnapshotResult {
         iceberg_snapshot_result,

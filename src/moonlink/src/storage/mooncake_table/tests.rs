@@ -3,8 +3,11 @@ use super::*;
 use crate::storage::iceberg::table_manager::MockTableManager;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::table_operation_test_utils::*;
+use crate::storage::mooncake_table::test_utils::{append_rows, test_row, test_table, TestContext};
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
+use crate::table_handler::table_handler_state::MaintenanceProcessStatus;
+use crate::table_handler::table_handler_state::TableHandlerState;
 use crate::FileSystemAccessor;
 use iceberg::{Error as IcebergError, ErrorKind};
 use rstest::*;
@@ -728,18 +731,16 @@ async fn test_streaming_begin_flush_commit_end_flush() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let mut disk_slice = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
-    table
-        .flush_stream_disk_slice(xact_id, &mut disk_slice)
-        .await
-        .unwrap();
+    let disk_slice =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, Some(lsn))
+            .await
+            .expect("Disk slice should be present");
 
     // Wait to apply the flush to simulate an async flush that hasn't returned
     // Commit the transaction while the flush is pending
     // This will move the state from the stream state to the snapshot task
     table
-        .commit_transaction_stream(xact_id, lsn + 1)
-        .await
+        .commit_transaction_stream_impl(xact_id, lsn + 1)
         .unwrap();
 
     // Make sure the row is visible in snapshot before flush finishes
@@ -778,10 +779,10 @@ async fn test_streaming_begin_flush_commit_end_flush() {
 
 #[tokio::test]
 async fn test_streaming_begin_flush_commit_end_flush_multiple() {
-    let context = TestContext::new("streaming_begin_flush_commit_end_flush");
+    let context = TestContext::new("streaming_begin_flush_commit_end_flush_multiple");
     let mut table = test_table(
         &context,
-        "streaming_begin_flush_commit_end_flush",
+        "streaming_begin_flush_commit_end_flush_multiple",
         IdentityProp::Keys(vec![0]),
     )
     .await;
@@ -797,30 +798,29 @@ async fn test_streaming_begin_flush_commit_end_flush_multiple() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let mut disk_slice1 = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
-    table
-        .flush_stream_disk_slice(xact_id, &mut disk_slice1)
-        .await
-        .unwrap();
+    let disk_slice1 =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, Some(lsn))
+            .await
+            .unwrap();
 
     let row2 = test_row(2, "B", 21);
     table.append_in_stream_batch(row2, xact_id).unwrap();
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let mut disk_slice2 = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
-    table
-        .flush_stream_disk_slice(xact_id, &mut disk_slice2)
-        .await
-        .unwrap();
+    let disk_slice2 = flush_stream_and_sync_no_apply(
+        &mut table,
+        &mut event_completion_rx,
+        xact_id,
+        Some(lsn + 1),
+    )
+    .await
+    .unwrap();
 
     // Wait to apply the flush to simulate an async flush that hasn't returned
     // Commit the transaction while the flush is pending
     // This will move the state from the stream state to the snapshot task
-    table
-        .commit_transaction_stream(xact_id, lsn + 1)
-        .await
-        .unwrap();
+    table.commit_transaction_stream_impl(xact_id, lsn).unwrap();
 
     // Make sure the rows are visible in snapshot before flush finishes
     create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
@@ -872,7 +872,7 @@ async fn test_streaming_begin_flush_commit_end_flush_multiple() {
 }
 
 #[tokio::test]
-async fn test_streaming_begin_flush_delete_commit_end_flush() {
+async fn test_streaming_begin_flush_commit_delete_end_flush() {
     let context = TestContext::new("streaming_begin_flush_commit_delete_end_flush");
     let mut table = test_table(
         &context,
@@ -894,23 +894,29 @@ async fn test_streaming_begin_flush_delete_commit_end_flush() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let mut disk_slice = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
-    table
-        .flush_stream_disk_slice(xact_id, &mut disk_slice)
-        .await
-        .unwrap();
+    let disk_slice =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, Some(lsn))
+            .await
+            .expect("Disk slice should be present");
 
     // Delete the row that is still flushing
     table.delete_in_stream_batch(row2, xact_id).await;
+
+    // Make sure the data is not visible before commit
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+    {
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths, ..
+        } = snapshot.request_read().await.unwrap();
+        assert_eq!(data_file_paths.len(), 0);
+    }
 
     // Finish the flush
     table.apply_stream_flush_result(xact_id, disk_slice);
 
     // Commit the transaction
-    table
-        .commit_transaction_stream(xact_id, lsn + 1)
-        .await
-        .unwrap();
+    table.commit_transaction_stream_impl(xact_id, lsn).unwrap();
 
     // Make sure we only have one row in the snapshot
     create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
@@ -937,11 +943,11 @@ async fn test_streaming_begin_flush_delete_commit_end_flush() {
 }
 
 #[tokio::test]
-async fn test_streaming_begin_flush_commit_delete_end_flush() {
-    let context = TestContext::new("streaming_begin_flush_commit_delete_end_flush");
+async fn test_streaming_begin_flush_delete_commit_end_flush() {
+    let context = TestContext::new("streaming_begin_flush_delete_commit_end_flush");
     let mut table = test_table(
         &context,
-        "streaming_begin_flush_commit_delete_end_flush",
+        "streaming_begin_flush_delete_commit_end_flush",
         IdentityProp::Keys(vec![0]),
     )
     .await;
@@ -959,18 +965,16 @@ async fn test_streaming_begin_flush_commit_delete_end_flush() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let mut disk_slice = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
-    table
-        .flush_stream_disk_slice(xact_id, &mut disk_slice)
-        .await
-        .unwrap();
+    let disk_slice =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, Some(lsn))
+            .await
+            .unwrap();
 
     // Wait to apply the flush to simulate an async flush that hasn't returned
     // Commit the transaction while the flush is pending
     // This will move the state from the stream state to the snapshot task
     table
-        .commit_transaction_stream(xact_id, lsn + 1)
-        .await
+        .commit_transaction_stream_impl(xact_id, lsn + 1)
         .unwrap();
 
     // Make sure the rows are visible in snapshot before flush finishes
@@ -993,21 +997,99 @@ async fn test_streaming_begin_flush_commit_delete_end_flush() {
 
     // Commit the new transaction
     table
-        .commit_transaction_stream(xact_id2, lsn2 + 1)
-        .await
+        .commit_transaction_stream_impl(xact_id2, lsn2 + 1)
         .unwrap();
 
-    let mut disk_slice2 = table
-        .prepare_stream_disk_slice(xact_id2, Some(lsn2))
-        .unwrap();
-    table
-        .flush_stream_disk_slice(xact_id2, &mut disk_slice2)
-        .await
-        .unwrap();
+    let disk_slice2 =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id2, Some(lsn2))
+            .await
+            .unwrap();
 
-    // Apply the flush for both transactions
     table.apply_stream_flush_result(xact_id, disk_slice);
     table.apply_stream_flush_result(xact_id2, disk_slice2);
+
+    // Make sure we only have one row in the snapshot
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+
+    // Read the snapshot
+    {
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths,
+            puffin_cache_handles,
+            position_deletes,
+            deletion_vectors,
+            ..
+        } = snapshot.request_read().await.unwrap();
+        verify_files_and_deletions(
+            get_data_files_for_read(&data_file_paths).as_slice(),
+            get_deletion_puffin_files_for_read(&puffin_cache_handles).as_slice(),
+            position_deletes,
+            deletion_vectors,
+            &[1],
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn test_streaming_begin_flush_commit_end_flush_delete() {
+    let context = TestContext::new("streaming_begin_flush_commit_end_flush_delete");
+    let mut table = test_table(
+        &context,
+        "streaming_begin_flush_commit_end_flush_delete",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id = 1;
+    let lsn = 1;
+
+    // Append a row to streaming mem slice
+    let row1 = test_row(1, "A", 20);
+    table.append_in_stream_batch(row1, xact_id).unwrap();
+    let row2 = test_row(2, "B", 21);
+    table.append_in_stream_batch(row2.clone(), xact_id).unwrap();
+
+    // Begin the flush
+    // This will drain the mem slice and add its relevant state to the stream state
+    // Wait to apply the flush to simulate an async flush that hasn't returned
+    // Commit the transaction while the flush is pending
+    // This will move the state from the stream state to the snapshot task
+    let disk_slice =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, Some(lsn))
+            .await
+            .unwrap();
+
+    // Commit the transaction
+    table.commit_transaction_stream_impl(xact_id, lsn).unwrap();
+
+    // Apply the flush
+    table.apply_stream_flush_result(xact_id, disk_slice);
+
+    // Make sure the rows are visible in snapshot before commit finishes
+    create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
+    // Read the snapshot
+    {
+        let mut snapshot = table.snapshot.write().await;
+        let SnapshotReadOutput {
+            data_file_paths, ..
+        } = snapshot.request_read().await.unwrap();
+        verify_file_contents(&data_file_paths[0].get_file_path(), &[1, 2], Some(2));
+    }
+
+    // Start a new transaction
+    let xact_id2 = 2;
+    let lsn2 = 2;
+
+    // Delete the row from the previous transaction (has not been flushed yet)
+    table.delete_in_stream_batch(row2, xact_id2).await;
+
+    // Flush and Commit the new transaction
+    commit_transaction_stream_and_sync(&mut table, &mut event_completion_rx, xact_id2, lsn2 + 1)
+        .await;
 
     // Make sure we only have one row in the snapshot
     create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
@@ -1046,7 +1128,6 @@ async fn test_streaming_begin_flush_abort_end_flush() {
     table.register_table_notify(event_completion_tx).await;
 
     let xact_id = 1;
-    let lsn = 1;
 
     // Append a row to streaming mem slice
     let row = test_row(1, "A", 20);
@@ -1054,11 +1135,10 @@ async fn test_streaming_begin_flush_abort_end_flush() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let mut disk_slice = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
-    table
-        .flush_stream_disk_slice(xact_id, &mut disk_slice)
-        .await
-        .unwrap();
+    let disk_slice =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, None)
+            .await
+            .expect("Disk slice should be present");
 
     // Wait to apply the flush to simulate an async flush that hasn't returned
     // Abort the transaction while the flush is pending
@@ -1092,7 +1172,6 @@ async fn test_streaming_begin_flush_abort_end_flush_multiple() {
     table.register_table_notify(event_completion_tx).await;
 
     let xact_id = 1;
-    let lsn = 1;
 
     // Append a row to streaming mem slice
     let row1 = test_row(1, "A", 20);
@@ -1102,17 +1181,15 @@ async fn test_streaming_begin_flush_abort_end_flush_multiple() {
 
     // Begin the flush
     // This will drain the mem slice and add its relevant state to the stream state
-    let mut disk_slice1 = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
-    table
-        .flush_stream_disk_slice(xact_id, &mut disk_slice1)
-        .await
-        .unwrap();
+    let disk_slice1 =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, None)
+            .await
+            .expect("Disk slice should be present");
 
-    let mut disk_slice2 = table.prepare_stream_disk_slice(xact_id, Some(lsn)).unwrap();
-    table
-        .flush_stream_disk_slice(xact_id, &mut disk_slice2)
-        .await
-        .unwrap();
+    let disk_slice2 =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, None)
+            .await
+            .expect("Disk slice should be present");
 
     // Wait to apply the flush to simulate an async flush that hasn't returned
     // Abort the transaction while the flush is pending
@@ -1142,12 +1219,917 @@ async fn test_streaming_begin_flush_abort_end_flush_multiple() {
     }
 }
 
+/// ===================================
+/// LSN Ordering Tests for Iceberg Snapshots
+/// ===================================
+
 #[tokio::test]
-async fn test_streaming_commit_with_unflushed_data() {
-    let context = TestContext::new("streaming_commit_with_unflushed_data");
+async fn test_pending_flush_lsns_tracking() -> Result<()> {
+    let context = TestContext::new("pending_flush_tracking");
+    let mut table = test_table(&context, "lsn_table", IdentityProp::FullRow).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    // Verify initially no pending flushes
+    assert!(table.pending_flush_lsns.is_empty());
+    assert_eq!(table.get_min_pending_flush_lsn(), u64::MAX);
+
+    // Add data and start multiple flushes with monotonically increasing LSNs
+    append_rows(&mut table, vec![test_row(1, "A", 20)])?;
+    table.commit(1);
+    let disk_slice_1 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 5)
+        .await
+        .expect("Disk slice 1 should be present");
+
+    append_rows(&mut table, vec![test_row(2, "B", 21)])?;
+    table.commit(2);
+    let disk_slice_2 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 10)
+        .await
+        .expect("Disk slice 2 should be present");
+
+    append_rows(&mut table, vec![test_row(3, "C", 22)])?;
+    table.commit(3);
+    let disk_slice_3 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 15)
+        .await
+        .expect("Disk slice 3 should be present");
+
+    // Verify all LSNs are tracked
+    assert!(table.pending_flush_lsns.contains(&5));
+    assert!(table.pending_flush_lsns.contains(&10));
+    assert!(table.pending_flush_lsns.contains(&15));
+    assert_eq!(table.pending_flush_lsns.len(), 3);
+
+    // Verify min is correctly calculated (should be 5)
+    assert_eq!(table.get_min_pending_flush_lsn(), 5);
+
+    // Complete flush with LSN 10 (out of order completion)
+    table.apply_flush_result(disk_slice_2);
+    assert!(table.pending_flush_lsns.contains(&5));
+    assert!(!table.pending_flush_lsns.contains(&10));
+    assert!(table.pending_flush_lsns.contains(&15));
+    assert_eq!(table.get_min_pending_flush_lsn(), 5); // Still 5
+
+    // Complete flush with LSN 5
+    table.apply_flush_result(disk_slice_1);
+    assert!(!table.pending_flush_lsns.contains(&5));
+    assert!(table.pending_flush_lsns.contains(&15));
+    assert_eq!(table.get_min_pending_flush_lsn(), 15); // Now 15
+
+    // Complete last flush
+    table.apply_flush_result(disk_slice_3);
+    assert!(table.pending_flush_lsns.is_empty());
+    assert_eq!(table.get_min_pending_flush_lsn(), u64::MAX);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_streaming_flush_lsns_tracking() -> Result<()> {
+    let context = TestContext::new("streaming_flush_tracking");
+    let mut table = test_table(&context, "lsn_table", IdentityProp::FullRow).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id_1 = 1;
+    let xact_id_2 = 2;
+
+    // Start streaming transactions
+    table.append_in_stream_batch(test_row(1, "A", 20), xact_id_1)?;
+    table.append_in_stream_batch(test_row(2, "B", 21), xact_id_2)?;
+
+    // Flush streaming transactions with different LSNs (can be out of order)
+    let disk_slice_1 =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id_1, Some(100))
+            .await
+            .expect("Disk slice 1 should be present");
+
+    let disk_slice_2 =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id_2, Some(50))
+            .await
+            .expect("Disk slice 2 should be present");
+
+    // Verify both streaming LSNs are tracked
+    assert!(table.pending_flush_lsns.contains(&100));
+    assert!(table.pending_flush_lsns.contains(&50));
+    assert_eq!(table.get_min_pending_flush_lsn(), 50);
+
+    // Mix with regular flush (must be higher than previous regular flush)
+    append_rows(&mut table, vec![test_row(3, "C", 22)])?;
+    table.commit(3);
+    let disk_slice_3 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 75)
+        .await
+        .expect("Disk slice 3 should be present");
+
+    // Verify all three LSNs are tracked
+    assert!(table.pending_flush_lsns.contains(&100));
+    assert!(table.pending_flush_lsns.contains(&50));
+    assert!(table.pending_flush_lsns.contains(&75));
+    assert_eq!(table.get_min_pending_flush_lsn(), 50);
+
+    // Complete streaming flushes
+    table.apply_stream_flush_result(xact_id_1, disk_slice_1);
+    table.apply_stream_flush_result(xact_id_2, disk_slice_2);
+    table.apply_flush_result(disk_slice_3);
+
+    // Verify all pending flushes are cleared
+    assert!(table.pending_flush_lsns.is_empty());
+    assert_eq!(table.get_min_pending_flush_lsn(), u64::MAX);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_lsn_ordering_constraint_with_real_table_handler_state() -> Result<()> {
+    let context = TestContext::new("lsn_ordering_constraint");
+    let mut table = test_table(&context, "lsn_table", IdentityProp::FullRow).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    // Test case 1: No pending flushes - should allow any flush LSN
+    assert!(table.pending_flush_lsns.is_empty());
+    let min_pending = table.get_min_pending_flush_lsn();
+    assert_eq!(min_pending, u64::MAX);
+
+    // With no pending flushes, should allow iceberg snapshots
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        100,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        1000,
+        min_pending,
+        true,
+        false
+    ));
+
+    // Test case 2: Start some flushes
+    append_rows(&mut table, vec![test_row(1, "A", 20)])?;
+    table.commit(1);
+    let disk_slice_1 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 30)
+        .await
+        .expect("Disk slice should be present");
+
+    append_rows(&mut table, vec![test_row(2, "B", 21)])?;
+    table.commit(2);
+    let disk_slice_2 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 50)
+        .await
+        .expect("Disk slice should be present");
+
+    let min_pending = table.get_min_pending_flush_lsn();
+    assert_eq!(min_pending, 30);
+
+    // Should allow iceberg snapshots with flush_lsn < 30
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        10,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        29,
+        min_pending,
+        true,
+        false
+    ));
+
+    // Should NOT allow iceberg snapshots with flush_lsn >= 30
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        30,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        40,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        100,
+        min_pending,
+        true,
+        false
+    ));
+
+    // Test case 3: Test iceberg snapshot ongoing constraint
+    // Even with valid flush_lsn < min_pending, should not allow due to ongoing snapshot
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        10,
+        min_pending,
+        true,
+        true
+    ));
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        29,
+        min_pending,
+        true,
+        true
+    ));
+
+    // Test case 4: Test iceberg snapshot result not consumed constraint
+    // Even with valid conditions, should not allow due to unconsumed result
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        10,
+        min_pending,
+        false,
+        false
+    ));
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        29,
+        min_pending,
+        false,
+        false
+    ));
+
+    // Complete the flush with LSN 30
+    table.apply_flush_result(disk_slice_1);
+    let min_pending = table.get_min_pending_flush_lsn();
+    assert_eq!(min_pending, 50);
+
+    // Now should allow iceberg snapshots with flush_lsn < 50
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        30,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        49,
+        min_pending,
+        true,
+        false
+    ));
+
+    // Should NOT allow iceberg snapshots with flush_lsn >= 50
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        50,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        60,
+        min_pending,
+        true,
+        false
+    ));
+
+    // Complete the remaining flush
+    table.apply_flush_result(disk_slice_2);
+    let min_pending = table.get_min_pending_flush_lsn();
+    assert_eq!(min_pending, u64::MAX);
+
+    // Now should allow any iceberg snapshot again
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        100,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        1000,
+        min_pending,
+        true,
+        false
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_out_of_order_flush_completion() -> Result<()> {
+    let context = TestContext::new("out_of_order_flush");
+    let mut table = test_table(&context, "lsn_table", IdentityProp::FullRow).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    // Start flushes in order: 10, 20, 30
+    append_rows(&mut table, vec![test_row(1, "A", 20)])?;
+    table.commit(1);
+    let disk_slice_10 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 10)
+        .await
+        .expect("Disk slice should be present");
+
+    append_rows(&mut table, vec![test_row(2, "B", 21)])?;
+    table.commit(2);
+    let disk_slice_20 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 20)
+        .await
+        .expect("Disk slice should be present");
+
+    append_rows(&mut table, vec![test_row(3, "C", 22)])?;
+    table.commit(3);
+    let disk_slice_30 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 30)
+        .await
+        .expect("Disk slice should be present");
+
+    // Verify all are pending and min is 10
+    assert!(table.pending_flush_lsns.contains(&10));
+    assert!(table.pending_flush_lsns.contains(&20));
+    assert!(table.pending_flush_lsns.contains(&30));
+    assert_eq!(table.get_min_pending_flush_lsn(), 10);
+
+    // Complete flush 30 first (out of order)
+    table.apply_flush_result(disk_slice_30);
+    assert!(!table.pending_flush_lsns.contains(&30));
+    assert!(table.pending_flush_lsns.contains(&10));
+    assert!(table.pending_flush_lsns.contains(&20));
+    assert_eq!(table.get_min_pending_flush_lsn(), 10); // Still 10
+
+    // Complete flush 10 (should update min to 20)
+    table.apply_flush_result(disk_slice_10);
+    assert!(!table.pending_flush_lsns.contains(&10));
+    assert!(table.pending_flush_lsns.contains(&20));
+    assert_eq!(table.get_min_pending_flush_lsn(), 20);
+
+    // Complete flush 20 (should clear all)
+    table.apply_flush_result(disk_slice_20);
+    assert!(table.pending_flush_lsns.is_empty());
+    assert_eq!(table.get_min_pending_flush_lsn(), u64::MAX);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mixed_regular_and_streaming_lsn_ordering() -> Result<()> {
+    let context = TestContext::new("mixed_lsn_ordering");
+    let mut table = test_table(&context, "lsn_table", IdentityProp::FullRow).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id = 1;
+
+    // Start regular flush with LSN 100
+    append_rows(&mut table, vec![test_row(1, "A", 20)])?;
+    table.commit(1);
+    let regular_disk_slice =
+        flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 100)
+            .await
+            .expect("Regular disk slice should be present");
+
+    // Start streaming flush with LSN 50 (lower than regular, but allowed for streaming)
+    table.append_in_stream_batch(test_row(2, "B", 21), xact_id)?;
+    let streaming_disk_slice =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, Some(50))
+            .await
+            .expect("Streaming disk slice should be present");
+
+    // Verify both are tracked and min is 50
+    assert!(table.pending_flush_lsns.contains(&100));
+    assert!(table.pending_flush_lsns.contains(&50));
+    assert_eq!(table.get_min_pending_flush_lsn(), 50);
+
+    // According to table handler logic, iceberg snapshots with flush_lsn >= 50 should be blocked
+    let min_pending = table.get_min_pending_flush_lsn();
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        50,
+        min_pending,
+        true,
+        false
+    )); // Blocked
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        75,
+        min_pending,
+        true,
+        false
+    )); // Blocked
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        40,
+        min_pending,
+        true,
+        false
+    )); // Allowed
+
+    // Complete streaming flush first
+    table.apply_stream_flush_result(xact_id, streaming_disk_slice);
+    assert!(!table.pending_flush_lsns.contains(&50));
+    assert!(table.pending_flush_lsns.contains(&100));
+    assert_eq!(table.get_min_pending_flush_lsn(), 100);
+
+    // Now iceberg snapshots with flush_lsn < 100 should be allowed
+    let min_pending = table.get_min_pending_flush_lsn();
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        75,
+        min_pending,
+        true,
+        false
+    )); // Now allowed
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        100,
+        min_pending,
+        true,
+        false
+    )); // Still blocked
+
+    // Complete regular flush
+    table.apply_flush_result(regular_disk_slice);
+    assert!(table.pending_flush_lsns.is_empty());
+    assert_eq!(table.get_min_pending_flush_lsn(), u64::MAX);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
+    let context = TestContext::new("lsn_ordering_tandem");
+    let mut table = test_table(&context, "lsn_table", IdentityProp::FullRow).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    // Test case 1: No pending flushes - both functions should allow operations
+    assert!(table.pending_flush_lsns.is_empty());
+    let min_pending = table.get_min_pending_flush_lsn();
+    assert_eq!(min_pending, u64::MAX);
+
+    // With no pending flushes, should allow iceberg snapshots for any flush_lsn
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        100,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        1000,
+        min_pending,
+        true,
+        false
+    ));
+
+    // With no pending flushes, should not force snapshots for any commit_lsn (no maintenance needed)
+    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+        100,
+        min_pending,
+        &MaintenanceProcessStatus::Unrequested,
+        None,
+        false
+    ));
+    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+        1000,
+        min_pending,
+        &MaintenanceProcessStatus::Unrequested,
+        None,
+        false
+    ));
+
+    // Test case 2: Start flushes and test both functions
+    append_rows(&mut table, vec![test_row(1, "A", 20)])?;
+    table.commit(1);
+    let disk_slice_1 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 30)
+        .await
+        .expect("Disk slice should be present");
+
+    append_rows(&mut table, vec![test_row(2, "B", 21)])?;
+    table.commit(2);
+    let disk_slice_2 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 50)
+        .await
+        .expect("Disk slice should be present");
+
+    let min_pending = table.get_min_pending_flush_lsn();
+    assert_eq!(min_pending, 30);
+
+    // Test complementary LSN ordering logic:
+    // can_initiate_iceberg_snapshot requires: flush_lsn < min_pending_flush_lsn
+    // should_force_snapshot_by_commit_lsn requires: min_pending_flush_lsn >= commit_lsn (returns false if min_pending_flush_lsn < commit_lsn)
+
+    // For LSNs < 30 (min pending):
+    // - can_initiate_iceberg_snapshot should return true (flush_lsn < min_pending)
+    // - should_force_snapshot_by_commit_lsn should return false (no force needed, min_pending >= commit_lsn)
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        10,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        29,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+        10,
+        min_pending,
+        &MaintenanceProcessStatus::Unrequested,
+        None,
+        false
+    ));
+    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+        29,
+        min_pending,
+        &MaintenanceProcessStatus::Unrequested,
+        None,
+        false
+    ));
+
+    // For LSNs >= 30 (min pending):
+    // - can_initiate_iceberg_snapshot should return false (flush_lsn >= min_pending)
+    // - should_force_snapshot_by_commit_lsn should return false (constraint violated: min_pending < commit_lsn)
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        30,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        40,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+        40,
+        min_pending,
+        &MaintenanceProcessStatus::Unrequested,
+        None,
+        false
+    )); // Blocked by LSN ordering
+    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+        100,
+        min_pending,
+        &MaintenanceProcessStatus::Unrequested,
+        None,
+        false
+    )); // Blocked by LSN ordering
+
+    // Test case 3: Complete first flush and test again
+    table.apply_flush_result(disk_slice_1);
+    let min_pending = table.get_min_pending_flush_lsn();
+    assert_eq!(min_pending, 50);
+
+    // Now with min_pending = 50:
+    // LSNs < 50 should allow iceberg snapshots
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        30,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        49,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+        30,
+        min_pending,
+        &MaintenanceProcessStatus::Unrequested,
+        None,
+        false
+    ));
+    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+        49,
+        min_pending,
+        &MaintenanceProcessStatus::Unrequested,
+        None,
+        false
+    ));
+
+    // LSNs >= 50 should block both
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        50,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
+        60,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+        50,
+        min_pending,
+        &MaintenanceProcessStatus::Unrequested,
+        None,
+        false
+    ));
+    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+        60,
+        min_pending,
+        &MaintenanceProcessStatus::Unrequested,
+        None,
+        false
+    ));
+
+    // Test case 4: Test state-based constraints for should_force_snapshot_by_commit_lsn
+    // Test ReadyToPersist maintenance status - should force snapshot regardless of LSN (if LSN constraints allow)
+    assert!(TableHandlerState::should_force_snapshot_by_commit_lsn(
+        25,
+        min_pending,
+        &MaintenanceProcessStatus::ReadyToPersist,
+        None,
+        false
+    )); // LSN 25 < min_pending (50), should be allowed and forced due to ReadyToPersist
+    assert!(TableHandlerState::should_force_snapshot_by_commit_lsn(
+        30,
+        min_pending,
+        &MaintenanceProcessStatus::ReadyToPersist,
+        None,
+        false
+    )); // LSN 30 < min_pending (50), should be allowed and forced due to ReadyToPersist
+
+    // But higher commit LSNs should still be blocked by the pending flush constraint
+    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+        60,
+        min_pending,
+        &MaintenanceProcessStatus::ReadyToPersist,
+        None,
+        false
+    )); // Blocked by LSN ordering even with ReadyToPersist
+
+    // Test force snapshot request with largest_force_snapshot_lsn
+    assert!(TableHandlerState::should_force_snapshot_by_commit_lsn(
+        25,
+        min_pending,
+        &MaintenanceProcessStatus::Unrequested,
+        Some(25), // Request force snapshot for LSN 25
+        false
+    )); // LSN 25 >= requested (25) and < min_pending (50), should be allowed
+    assert!(TableHandlerState::should_force_snapshot_by_commit_lsn(
+        30,
+        min_pending,
+        &MaintenanceProcessStatus::Unrequested,
+        Some(25), // Request force snapshot for LSN 25
+        false
+    )); // LSN 30 >= requested (25) and < min_pending (50), should be allowed
+
+    // Complete the remaining flush
+    table.apply_flush_result(disk_slice_2);
+    let min_pending = table.get_min_pending_flush_lsn();
+    assert_eq!(min_pending, u64::MAX);
+
+    // Now with no pending flushes, both functions should work without LSN constraints
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        100,
+        min_pending,
+        true,
+        false
+    ));
+    assert!(TableHandlerState::can_initiate_iceberg_snapshot(
+        1000,
+        min_pending,
+        true,
+        false
+    ));
+
+    // Force snapshot should now work for requested LSN (if other conditions are met)
+    assert!(TableHandlerState::should_force_snapshot_by_commit_lsn(
+        25,
+        min_pending,
+        &MaintenanceProcessStatus::Unrequested,
+        Some(25),
+        false
+    )); // Now force snapshot can proceed
+    assert!(TableHandlerState::should_force_snapshot_by_commit_lsn(
+        100,
+        min_pending,
+        &MaintenanceProcessStatus::Unrequested,
+        Some(25),
+        false
+    )); // Higher LSNs also work
+
+    // Test mooncake_snapshot_ongoing constraint
+    assert!(!TableHandlerState::should_force_snapshot_by_commit_lsn(
+        25,
+        min_pending,
+        &MaintenanceProcessStatus::ReadyToPersist,
+        Some(25),
+        true // mooncake_snapshot_ongoing = true
+    )); // Should be blocked even with ReadyToPersist and force request
+
+    Ok(())
+}
+
+/// ===================================
+/// Tests for Iceberg Snapshot Pipeline
+/// ===================================
+
+#[tokio::test]
+async fn test_iceberg_snapshot_blocked_by_pending_flushes() -> Result<()> {
+    let context = TestContext::new("iceberg_snapshot_blocked");
+    let mut table = test_table(&context, "blocked_table", IdentityProp::FullRow).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    // Add data and start a flush but don't complete it
+    append_rows(&mut table, vec![test_row(1, "A", 20)])?;
+    table.commit(1);
+    let disk_slice_1 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 30)
+        .await
+        .expect("Disk slice should be present");
+
+    // Add more data and commit it (this will be part of the snapshot)
+    append_rows(&mut table, vec![test_row(2, "B", 21)])?;
+    table.commit(2);
+
+    // Verify we have pending flushes
+    assert!(table.pending_flush_lsns.contains(&30));
+    assert_eq!(table.get_min_pending_flush_lsn(), 30);
+
+    // Create a mooncake snapshot - this will create an iceberg payload
+    let created = table.create_snapshot(SnapshotOption {
+        uuid: uuid::Uuid::new_v4(),
+        force_create: true,
+        skip_iceberg_snapshot: false,
+        index_merge_option: MaintenanceOption::Skip,
+        data_compaction_option: MaintenanceOption::Skip,
+    });
+    assert!(created, "Mooncake snapshot should be created");
+
+    // Wait for mooncake snapshot completion
+    let (commit_lsn, iceberg_snapshot_payload, _, _, _) =
+        sync_mooncake_snapshot(&mut table, &mut event_completion_rx).await;
+
+    assert_eq!(commit_lsn, 2, "Should have committed data up to LSN 2");
+
+    // Test the table handler constraint logic
+    if let Some(payload) = iceberg_snapshot_payload {
+        let min_pending = table.get_min_pending_flush_lsn();
+
+        // The table handler should block this iceberg snapshot due to pending flushes
+        let can_initiate = TableHandlerState::can_initiate_iceberg_snapshot(
+            payload.flush_lsn,
+            min_pending,
+            true,  // iceberg_snapshot_result_consumed
+            false, // iceberg_snapshot_ongoing
+        );
+
+        assert!(!can_initiate,
+            "Table handler should block iceberg snapshot due to pending flush at LSN {} vs payload flush LSN {}", 
+            min_pending, payload.flush_lsn);
+    }
+
+    // Complete the pending flush
+    table.apply_flush_result(disk_slice_1);
+    assert!(table.pending_flush_lsns.is_empty());
+
+    // Now test that iceberg snapshots can proceed
+    let created = table.create_snapshot(SnapshotOption {
+        uuid: uuid::Uuid::new_v4(),
+        force_create: true,
+        skip_iceberg_snapshot: false,
+        index_merge_option: MaintenanceOption::Skip,
+        data_compaction_option: MaintenanceOption::Skip,
+    });
+    assert!(created, "Second mooncake snapshot should be created");
+
+    let (_, iceberg_snapshot_payload, _, _, _) =
+        sync_mooncake_snapshot(&mut table, &mut event_completion_rx).await;
+
+    // Now table handler should allow iceberg snapshot
+    if let Some(payload) = iceberg_snapshot_payload {
+        let min_pending = table.get_min_pending_flush_lsn();
+        let can_initiate = TableHandlerState::can_initiate_iceberg_snapshot(
+            payload.flush_lsn,
+            min_pending,
+            true,
+            false,
+        );
+
+        assert!(
+            can_initiate,
+            "Table handler should allow iceberg snapshot when no pending flushes"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_out_of_order_flush_completion_with_iceberg_snapshots() -> Result<()> {
+    let context = TestContext::new("out_of_order_iceberg");
+    let mut table = test_table(&context, "ooo_table", IdentityProp::FullRow).await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    // Start multiple flushes
+    append_rows(&mut table, vec![test_row(1, "A", 20)])?;
+    table.commit(1);
+    let disk_slice_1 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 10)
+        .await
+        .expect("Disk slice 1 should be present");
+
+    append_rows(&mut table, vec![test_row(2, "B", 21)])?;
+    table.commit(2);
+    let disk_slice_2 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 20)
+        .await
+        .expect("Disk slice 2 should be present");
+
+    append_rows(&mut table, vec![test_row(3, "C", 22)])?;
+    table.commit(3);
+    let disk_slice_3 = flush_table_and_sync_no_apply(&mut table, &mut event_completion_rx, 30)
+        .await
+        .expect("Disk slice 3 should be present");
+
+    // Verify all pending flushes and min pending LSN
+    assert_eq!(table.get_min_pending_flush_lsn(), 10);
+    assert!(table.pending_flush_lsns.contains(&10));
+    assert!(table.pending_flush_lsns.contains(&20));
+    assert!(table.pending_flush_lsns.contains(&30));
+
+    // Create snapshot and test constraint with min_pending_flush_lsn = 10
+    let created = table.create_snapshot(SnapshotOption {
+        uuid: uuid::Uuid::new_v4(),
+        force_create: true,
+        skip_iceberg_snapshot: false,
+        index_merge_option: MaintenanceOption::Skip,
+        data_compaction_option: MaintenanceOption::Skip,
+    });
+    assert!(created);
+
+    let (_, iceberg_snapshot_payload, _, _, _) =
+        sync_mooncake_snapshot(&mut table, &mut event_completion_rx).await;
+
+    // Test constraint with min pending flush LSN = 10
+    if let Some(payload) = iceberg_snapshot_payload {
+        let can_initiate = TableHandlerState::can_initiate_iceberg_snapshot(
+            payload.flush_lsn,
+            10, // min_pending_flush_lsn
+            true,
+            false,
+        );
+
+        // Should be blocked if flush_lsn >= 10
+        if payload.flush_lsn >= 10 {
+            assert!(
+                !can_initiate,
+                "Should block iceberg snapshot when flush_lsn {} >= min_pending_flush_lsn 10",
+                payload.flush_lsn
+            );
+        } else {
+            assert!(
+                can_initiate,
+                "Should allow iceberg snapshot when flush_lsn {} < min_pending_flush_lsn 10",
+                payload.flush_lsn
+            );
+        }
+    }
+
+    // Complete flushes OUT OF ORDER - complete middle one first (LSN 20)
+    table.apply_flush_result(disk_slice_2);
+    assert_eq!(table.get_min_pending_flush_lsn(), 10); // Should still be 10
+    assert!(table.pending_flush_lsns.contains(&10));
+    assert!(!table.pending_flush_lsns.contains(&20));
+    assert!(table.pending_flush_lsns.contains(&30));
+
+    // Complete the first flush (LSN 10) - now min should be 30
+    table.apply_flush_result(disk_slice_1);
+    assert_eq!(table.get_min_pending_flush_lsn(), 30); // Now should be 30
+    assert!(!table.pending_flush_lsns.contains(&10));
+    assert!(!table.pending_flush_lsns.contains(&20));
+    assert!(table.pending_flush_lsns.contains(&30));
+
+    // Test constraint logic with new min pending flush LSN = 30
+    let can_initiate_low = TableHandlerState::can_initiate_iceberg_snapshot(
+        25, // flush_lsn < min_pending_flush_lsn
+        30, // min_pending_flush_lsn
+        true, false,
+    );
+    assert!(
+        can_initiate_low,
+        "Should allow iceberg snapshot when flush_lsn < min_pending_flush_lsn"
+    );
+
+    let can_initiate_high = TableHandlerState::can_initiate_iceberg_snapshot(
+        35, // flush_lsn > min_pending_flush_lsn
+        30, // min_pending_flush_lsn
+        true, false,
+    );
+    assert!(
+        !can_initiate_high,
+        "Should block iceberg snapshot when flush_lsn >= min_pending_flush_lsn"
+    );
+
+    // Complete the last flush
+    table.apply_flush_result(disk_slice_3);
+    assert!(table.pending_flush_lsns.is_empty());
+    assert_eq!(table.get_min_pending_flush_lsn(), u64::MAX);
+
+    // Now any flush LSN should be allowed
+    let can_initiate_any = TableHandlerState::can_initiate_iceberg_snapshot(
+        100,      // Any flush_lsn
+        u64::MAX, // No pending flushes
+        true,
+        false,
+    );
+    assert!(
+        can_initiate_any,
+        "Should allow any iceberg snapshot when no pending flushes"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_streaming_batch_id_mismatch_with_data_compaction() -> Result<()> {
+    let context = TestContext::new("streaming_batch_id_mismatch");
     let mut table = test_table(
         &context,
-        "streaming_commit_with_unflushed_data",
+        "streaming_batch_id_mismatch",
         IdentityProp::Keys(vec![0]),
     )
     .await;
@@ -1155,25 +2137,372 @@ async fn test_streaming_commit_with_unflushed_data() {
     table.register_table_notify(event_completion_tx).await;
 
     let xact_id = 1;
-    let lsn = 1;
 
-    // Append rows to streaming mem slice but don't flush them
-    let row1 = test_row(1, "A", 20);
-    table.append_in_stream_batch(row1, xact_id).unwrap();
-    let row2 = test_row(2, "B", 21);
-    table.append_in_stream_batch(row2, xact_id).unwrap();
+    // Step 1: Create initial data in main table and flush it to create data files
+    // This is needed for data compaction to trigger
+    append_rows(&mut table, vec![test_row(1, "Initial", 20)])?;
+    table.commit(1);
+    flush_table_and_sync(&mut table, &mut event_completion_rx, 10).await?;
+    create_mooncake_and_persist_for_test(&mut table, &mut event_completion_rx).await;
 
-    // Commit the transaction directly without flushing first
-    table.commit_transaction_stream(xact_id, lsn).await.unwrap();
+    // Step 2: Start a streaming transaction with multiple operations
+    // Add rows to streaming transaction
+    table.append_in_stream_batch(test_row(2, "Stream1", 21), xact_id)?;
+    table.append_in_stream_batch(test_row(3, "Stream2", 22), xact_id)?;
 
-    // Verify the data is still accessible after commit
+    // Step 3: Flush the streaming transaction
+    // This creates a disk slice with the original batch IDs
+    let disk_slice =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, Some(20))
+            .await
+            .expect("Disk slice should be present");
+
+    // Step 4: Delete one of the rows in the streaming transaction
+    // This can cause some batches to become empty after filtering
+    table
+        .delete_in_stream_batch(test_row(3, "Stream2", 22), xact_id)
+        .await;
+
+    // Step 5: Commit the streaming transaction
+    // This processes the batches and adds filtered ones to new_record_batches
+    // But some original batch IDs might be missing from the filtered results
+    table.commit_transaction_stream_impl(xact_id, 21)?;
+
+    // Step 6: Apply the flush result
+    // The disk slice still contains the original batch IDs
+    table.apply_stream_flush_result(xact_id, disk_slice);
+
+    // Step 7: Create a mooncake snapshot
     create_mooncake_snapshot_for_test(&mut table, &mut event_completion_rx).await;
 
-    let mut snapshot = table.snapshot.write().await;
-    let SnapshotReadOutput {
-        data_file_paths, ..
-    } = snapshot.request_read().await.unwrap();
+    // Step 8: Add more data to trigger data compaction
+    append_rows(&mut table, vec![test_row(4, "PostStream", 23)])?;
+    table.commit(35); // Use LSN >= flush LSN (30) to satisfy validation
+    flush_table_and_sync(&mut table, &mut event_completion_rx, 30).await?;
 
-    // Should have the data from the unflushed mem slice
-    verify_file_contents(&data_file_paths[0].get_file_path(), &[1, 2], Some(2));
+    // Step 9: Force data compaction
+    let created = table.create_snapshot(SnapshotOption {
+        uuid: uuid::Uuid::new_v4(),
+        force_create: true,
+        skip_iceberg_snapshot: true, // Skip iceberg to focus on the mooncake issue
+        index_merge_option: MaintenanceOption::Skip,
+        data_compaction_option: MaintenanceOption::ForceRegular, // Trigger data compaction
+    });
+
+    assert!(created, "Mooncake snapshot should be created");
+
+    // This should trigger the assertion failure:
+    // "assertion failed: self.batches.remove(&b.id).is_some()"
+    // in integrate_disk_slices at line 741
+    sync_mooncake_snapshot(&mut table, &mut event_completion_rx).await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_streaming_empty_batch_filtering_bug() -> Result<()> {
+    let context = TestContext::new("streaming_empty_batch_filtering");
+    let mut table = test_table(
+        &context,
+        "streaming_empty_batch_filtering",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id1 = 1;
+    let xact_id2 = 2;
+
+    // Create some initial data for compaction
+    append_rows(&mut table, vec![test_row(1, "Base", 20)])?;
+    table.commit(1);
+    flush_table_and_sync(&mut table, &mut event_completion_rx, 5).await?;
+
+    // Stream 1: Add and immediately delete rows (creates empty batches)
+    table.append_in_stream_batch(test_row(2, "ToDelete", 21), xact_id1)?;
+    table.append_in_stream_batch(test_row(3, "AlsoDelete", 22), xact_id1)?;
+
+    // Flush stream 1
+    let disk_slice1 =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id1, Some(10))
+            .await
+            .expect("Stream 1 disk slice should be present");
+
+    // Delete all rows in stream 1 (making batches empty after filtering)
+    table
+        .delete_in_stream_batch(test_row(2, "ToDelete", 21), xact_id1)
+        .await;
+    table
+        .delete_in_stream_batch(test_row(3, "AlsoDelete", 22), xact_id1)
+        .await;
+
+    // Commit stream 1
+    table.commit_transaction_stream_impl(xact_id1, 11)?;
+    table.apply_stream_flush_result(xact_id1, disk_slice1);
+
+    // Stream 2: Normal operations
+    table.append_in_stream_batch(test_row(4, "Keep", 23), xact_id2)?;
+    commit_transaction_stream_and_sync(&mut table, &mut event_completion_rx, xact_id2, 15).await;
+
+    // Add more data to trigger compaction threshold
+    append_rows(&mut table, vec![test_row(5, "More", 24)])?;
+    table.commit(3);
+    flush_table_and_sync(&mut table, &mut event_completion_rx, 20).await?;
+
+    // Create snapshot with data compaction
+    let created = table.create_snapshot(SnapshotOption {
+        uuid: uuid::Uuid::new_v4(),
+        force_create: true,
+        skip_iceberg_snapshot: true,
+        index_merge_option: MaintenanceOption::Skip,
+        data_compaction_option: MaintenanceOption::ForceRegular,
+    });
+
+    assert!(created);
+
+    sync_mooncake_snapshot(&mut table, &mut event_completion_rx).await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_batch_id_removal_assertion_direct() -> Result<()> {
+    let context = TestContext::new("batch_id_removal_assertion");
+    let mut table = test_table(
+        &context,
+        "batch_id_removal_assertion",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    let xact_id = 1;
+
+    // Step 1: Create a streaming transaction with rows that will be filtered out
+    // Add a row to the streaming transaction
+    table.append_in_stream_batch(test_row(1, "ToFilter", 20), xact_id)?;
+
+    // Step 2: Immediately delete the row, making the batch empty after filtering
+    // This simulates the scenario where batches become empty and get filtered out
+    table
+        .delete_in_stream_batch(test_row(1, "ToFilter", 20), xact_id)
+        .await;
+
+    // Step 3: Flush the streaming transaction while it has the deletion
+    // This creates a disk slice that contains the original batch ID
+    // but the batch will be filtered out during processing (empty after deletion)
+    let disk_slice =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, Some(10))
+            .await
+            .expect("Disk slice should be present");
+
+    // Step 4: Commit the streaming transaction
+    table.commit_transaction_stream_impl(xact_id, 11)?;
+
+    // Step 5: Apply the stream flush result
+    table.apply_stream_flush_result(xact_id, disk_slice);
+
+    // Step 6: Create a simple snapshot
+    let created = table.create_snapshot(SnapshotOption {
+        uuid: uuid::Uuid::new_v4(),
+        force_create: true,
+        skip_iceberg_snapshot: true,
+        index_merge_option: MaintenanceOption::Skip,
+        data_compaction_option: MaintenanceOption::Skip, // No compaction to avoid other issues
+    });
+
+    assert!(created, "Mooncake snapshot should be created");
+
+    sync_mooncake_snapshot(&mut table, &mut event_completion_rx).await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_puffin_deletion_blob_inconsistency_assertion() -> Result<()> {
+    let context = TestContext::new("puffin_deletion_blob_inconsistency");
+    let mut table = test_table(
+        &context,
+        "puffin_deletion_blob_inconsistency",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    // Step 1: Create initial data and flush it to create persistent data files
+    append_rows(
+        &mut table,
+        vec![
+            test_row(1, "Data1", 20),
+            test_row(2, "Data2", 21),
+            test_row(3, "Data3", 22),
+            test_row(4, "Data4", 23),
+        ],
+    )?;
+    table.commit(1);
+    flush_table_and_sync(&mut table, &mut event_completion_rx, 10).await?;
+
+    // Step 2: Delete some rows to create deletion vectors
+    table.delete(test_row(2, "Data2", 21), 11).await;
+    table.delete(test_row(3, "Data3", 22), 11).await;
+    table.commit(12);
+
+    // Step 3: Create and persist snapshot to create puffin deletion blobs
+    // This should persist the deletion vectors as puffin blobs
+    create_mooncake_and_persist_for_test(&mut table, &mut event_completion_rx).await;
+
+    // Step 4: Add more data to trigger compaction threshold
+    append_rows(
+        &mut table,
+        vec![
+            test_row(5, "Data5", 24),
+            test_row(6, "Data6", 25),
+            test_row(7, "Data7", 26),
+            test_row(8, "Data8", 27),
+        ],
+    )?;
+    table.commit(15);
+    flush_table_and_sync(&mut table, &mut event_completion_rx, 20).await?;
+
+    // Step 5: Create more deletions and persist again
+    table.delete(test_row(5, "Data5", 24), 21).await;
+    table.delete(test_row(6, "Data6", 25), 21).await;
+    table.commit(22);
+    create_mooncake_and_persist_for_test(&mut table, &mut event_completion_rx).await;
+
+    // Step 6: Add even more data to ensure we have enough files for compaction
+    append_rows(
+        &mut table,
+        vec![test_row(9, "Data9", 28), test_row(10, "Data10", 29)],
+    )?;
+    table.commit(27);
+    flush_table_and_sync(&mut table, &mut event_completion_rx, 26).await?;
+
+    // Step 7: Force data compaction
+    let created = table.create_snapshot(SnapshotOption {
+        uuid: uuid::Uuid::new_v4(),
+        force_create: true,
+        skip_iceberg_snapshot: true,
+        index_merge_option: MaintenanceOption::Skip,
+        data_compaction_option: MaintenanceOption::ForceRegular, // Force data compaction
+    });
+
+    assert!(created, "Mooncake snapshot should be created");
+
+    sync_mooncake_snapshot(&mut table, &mut event_completion_rx).await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_stream_commit_with_pending_flush_deletion_remapping_bug() -> Result<()> {
+    let context = TestContext::new("stream_commit_pending_flush_deletion_bug");
+    let mut table = test_table(
+        &context,
+        "stream_commit_pending_flush_deletion_bug",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    // Step 1: Add some initial data and flush it to create a data file
+    append_rows(&mut table, vec![test_row(1, "Initial", 20)])?;
+    table.commit(1);
+    flush_table_and_sync(&mut table, &mut event_completion_rx, 2).await?;
+
+    // Step 2: Start a streaming transaction
+    let xact_id = 1;
+    table.append_in_stream_batch(test_row(2, "Stream", 21), xact_id)?;
+
+    // Step 3: Delete a row from the committed data within the streaming transaction
+    // This adds the deletion to committed_deletion_log
+    table
+        .delete_in_stream_batch(test_row(1, "Initial", 20), xact_id)
+        .await;
+
+    // Step 4: Flush the streaming transaction (creates disk slice)
+    // The disk slice now contains the deletion remapping info
+    let disk_slice =
+        flush_stream_and_sync_no_apply(&mut table, &mut event_completion_rx, xact_id, Some(4))
+            .await
+            .expect("Disk slice should be present");
+
+    // Step 5: Commit the streaming transaction
+    // This processes deletions and adds them to committed_deletion_log
+    // but the disk slice is still pending to be integrated
+    table.commit_transaction_stream_impl(xact_id, 3)?;
+
+    // Step 6: Apply the stream flush result
+    // This adds the disk slice to snapshot_task for later processing
+    table.apply_stream_flush_result(xact_id, disk_slice);
+
+    // Step 7: Create a snapshot to trigger integrate_disk_slices
+    // Without the fix, this would fail because deletions in committed_deletion_log
+    // get remapped but not applied to batch_deletion_vector
+    let created = table.create_snapshot(SnapshotOption {
+        uuid: uuid::Uuid::new_v4(),
+        force_create: true,
+        skip_iceberg_snapshot: true,
+        index_merge_option: MaintenanceOption::Skip,
+        data_compaction_option: MaintenanceOption::Skip,
+    });
+    assert!(created, "Mooncake snapshot should be created");
+
+    // This should succeed with the fix, but would fail without it
+    sync_mooncake_snapshot(&mut table, &mut event_completion_rx).await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_chaos_sequence_exact_repro_with_async_flush() -> Result<()> {
+    let context = TestContext::new("chaos_sequence_exact_repro_async_flush");
+    let mut table = test_table(
+        &context,
+        "chaos_sequence_exact_repro_async_flush",
+        IdentityProp::Keys(vec![0]),
+    )
+    .await;
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    // LSN 0-3: First streaming transaction
+    let xact_id_0 = 0;
+    table.append_in_stream_batch(test_row(0, "user", 0), xact_id_0)?; // LSN 0
+    table.append_in_stream_batch(test_row(1, "user", 1), xact_id_0)?; // LSN 1
+    table
+        .delete_in_stream_batch(test_row(0, "user", 0), xact_id_0)
+        .await; // LSN 2
+    table.commit_transaction_stream_impl(xact_id_0, 3)?; // LSN 3
+
+    // LSN 4-7: Non-streaming operations
+    table.append(test_row(2, "user", 2))?; // LSN 4
+    table.delete(test_row(1, "user", 1), 5).await; // LSN 5
+    table.append(test_row(3, "user", 3))?; // LSN 6
+    table.commit(7); // LSN 7 - CommitFlush
+
+    // LSN 8-10: Second streaming transaction with flush
+    let xact_id_1 = 1;
+    table.append_in_stream_batch(test_row(4, "user", 4), xact_id_1)?; // LSN 8
+    table.append_in_stream_batch(test_row(5, "user", 0), xact_id_1)?; // LSN 9
+    commit_transaction_stream_and_sync(&mut table, &mut event_completion_rx, xact_id_1, 10).await; // LSN 10 - CommitFlush
+
+    let created = table.create_snapshot(SnapshotOption {
+        uuid: uuid::Uuid::new_v4(),
+        force_create: true,
+        skip_iceberg_snapshot: true,
+        index_merge_option: MaintenanceOption::Skip,
+        data_compaction_option: MaintenanceOption::Skip,
+    });
+    assert!(created, "Mooncake snapshot should be created");
+
+    // This should fail with the same assertion as the chaos test:
+    // "assertion failed: res" at snapshot.rs:893:21
+    sync_mooncake_snapshot(&mut table, &mut event_completion_rx).await;
+
+    Ok(())
 }

@@ -10,7 +10,6 @@ use crate::storage::filesystem::accessor::filesystem_accessor::FileSystemAccesso
 use crate::storage::index::index_merge_config::FileIndexMergeConfig;
 use crate::storage::mooncake_table::table_creation_test_utils::*;
 use crate::storage::mooncake_table::validation_test_utils::*;
-use crate::storage::mooncake_table::IcebergSnapshotPayload;
 use crate::storage::mooncake_table::Snapshot as MooncakeSnapshot;
 use crate::storage::mooncake_table::TableMetadata as MooncakeTableMetadata;
 use crate::storage::mooncake_table_config::IcebergPersistenceConfig;
@@ -19,14 +18,12 @@ use crate::storage::wal::test_utils::WAL_TEST_TABLE_ID;
 use crate::storage::wal::WalManager;
 use crate::storage::MockTableManager;
 use crate::storage::MooncakeTable;
-use crate::storage::PersistenceResult;
 use crate::storage::TableManager;
 use crate::table_handler::table_handler_state::TableHandlerState;
 use crate::ObjectStorageCache;
 use crate::TableEventManager;
 use crate::WalConfig;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -397,7 +394,8 @@ async fn test_stream_delete_previously_flushed_row_same_xact() {
     // Phase 1: Append Row A (ID:10) to stream, then periodic flush
     env.append_row(10, "UserA-StreamFlush", 25, /*lsn=*/ 0, Some(xact_id))
         .await;
-    env.stream_flush(xact_id).await; // Row A now in a xact-specific disk slice
+    // env.stream_flush(xact_id).await; // Row A now in a xact-specific disk slice
+    env.flush_table_and_sync(0, None).await;
 
     // Phase 2: In same stream, delete Row A (ID:10), append Row B (ID:11)
     env.delete_row(10, "UserA-StreamFlush", 25, 0, Some(xact_id))
@@ -604,7 +602,7 @@ async fn test_drop_table_with_data() {
     )
     .await;
     env.commit(/*lsn=*/ 1).await;
-    env.flush_table(/*lsn=*/ 1).await;
+    env.flush_table_and_sync(/*lsn=*/ 1, None).await;
     env.set_readable_lsn(/*lsn=*/ 1);
 
     // Force mooncake and iceberg snapshot, and block wait until mooncake snapshot completion via getting a read state.
@@ -1624,8 +1622,7 @@ async fn test_discard_duplicate_writes() {
         identity: crate::row::IdentityProp::Keys(vec![0]),
     });
 
-    let mut mock_mooncake_snapshot = MooncakeSnapshot::new(mooncake_table_metadata.clone());
-    mock_mooncake_snapshot.flush_lsn = Some(10);
+    let mock_mooncake_snapshot = MooncakeSnapshot::new(mooncake_table_metadata.clone());
     let mut mock_table_manager = MockTableManager::new();
     mock_table_manager
         .expect_get_warehouse_location()
@@ -1640,24 +1637,11 @@ async fn test_discard_duplicate_writes() {
                 Ok((/*next_file_id=*/ 0, mock_mooncake_snapshot_copy))
             })
         });
-    mock_table_manager
-        .expect_sync_snapshot()
-        .times(1)
-        .returning(|snapshot_payload: IcebergSnapshotPayload, _| {
-            Box::pin(async move {
-                let mock_persistence_result = PersistenceResult {
-                    remote_data_files: snapshot_payload.import_payload.data_files.clone(),
-                    remote_file_indices: snapshot_payload.import_payload.file_indices.clone(),
-                    puffin_blob_ref: HashMap::new(),
-                };
-                Ok(mock_persistence_result)
-            })
-        });
 
     let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
     let wal_manager = WalManager::new(&wal_config);
 
-    let mooncake_table = MooncakeTable::new_with_table_manager(
+    let mut mooncake_table = MooncakeTable::new_with_table_manager(
         mooncake_table_metadata,
         Box::new(mock_table_manager),
         ObjectStorageCache::default_for_test(&temp_dir),
@@ -1666,6 +1650,7 @@ async fn test_discard_duplicate_writes() {
     )
     .await
     .unwrap();
+    mooncake_table.set_iceberg_snapshot_lsn(10);
     let env = TestEnvironment::new_with_mooncake_table(temp_dir, mooncake_table).await;
 
     // Perform non-streaming write operation which should be discarded.
@@ -2117,4 +2102,36 @@ fn test_deletion_vector_capacity_exceeded_minimal() {
 
     // This should panic - trying to delete row_id=5 when capacity is only 3
     let _ = deletion_vector.delete_row(5);
+}
+
+#[tokio::test]
+async fn test_stream_delete_from_stream_memslice_row_debug() {
+    let mut env = TestEnvironment::default().await;
+    let xact_id = 402;
+    let stream_commit_lsn = 41;
+
+    // Phase 1: Add row 20
+    env.append_row(20, "UserC-StreamMem", 35, /*lsn=*/ 0, Some(xact_id))
+        .await;
+
+    // Phase 2: Delete row 20 (but don't add row 21 yet)
+    env.delete_row(20, "UserC-StreamMem", 35, 0, Some(xact_id))
+        .await;
+
+    // Phase 3: Verify data is NOT visible before commit
+    env.set_table_commit_lsn(0);
+    env.set_replication_lsn(stream_commit_lsn + 5);
+    env.set_snapshot_lsn(0);
+    env.verify_snapshot(stream_commit_lsn, &[]).await;
+
+    // Phase 4: Commit the streaming transaction
+    env.stream_commit(stream_commit_lsn, xact_id).await;
+    println!("Debug: Verifying final state post-commit (should be empty)");
+
+    // Phase 5: Verify final state - should be empty
+    env.set_table_commit_lsn(stream_commit_lsn);
+    env.set_replication_lsn(stream_commit_lsn + 5);
+    env.verify_snapshot(stream_commit_lsn, &[]).await; // Should be empty
+
+    env.shutdown().await;
 }

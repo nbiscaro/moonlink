@@ -22,7 +22,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tracing::Instrument;
 use tracing::{debug, error, info_span};
-mod table_handler_state;
+pub(crate) mod table_handler_state;
 use table_handler_state::{
     MaintenanceProcessStatus, MaintenanceRequestStatus, SpecialTableState, TableHandlerState,
 };
@@ -291,7 +291,7 @@ impl TableHandler {
                         }
                         TableEvent::FinishInitialCopy { start_lsn } => {
                             debug!("finishing initial copy");
-                            if let Err(e) = table.commit_transaction_stream(INITIAL_COPY_XACT_ID, 0).await {
+                            if let Err(e) = table.commit_transaction_stream(INITIAL_COPY_XACT_ID, 0) {
                                 error!(error = %e, "failed to finish initial copy");
                             }
                             // Force create the snapshot with LSN 0
@@ -323,7 +323,7 @@ impl TableHandler {
                             // Check whether a flush and force snapshot is needed.
                             if table_handler_state.has_pending_force_snapshot_request() && !table_handler_state.iceberg_snapshot_ongoing {
                                 if let Some(commit_lsn) = table_handler_state.table_consistent_view_lsn {
-                                    table.flush(commit_lsn).await.unwrap();
+                                    table.flush(commit_lsn).unwrap();
                                     table_handler_state.last_unflushed_commit_lsn = None;
                                     table_handler_state.reset_iceberg_state_at_mooncake_snapshot();
                                     if let SpecialTableState::AlterTable { .. } = table_handler_state.special_table_state {
@@ -376,7 +376,8 @@ impl TableHandler {
                             table.notify_snapshot_reader(lsn);
 
                             // Process iceberg snapshot and trigger iceberg snapshot if necessary.
-                            if table_handler_state.can_initiate_iceberg_snapshot() {
+                            let min_pending_flush_lsn = table.get_min_pending_flush_lsn();
+                            if TableHandlerState::can_initiate_iceberg_snapshot(lsn, min_pending_flush_lsn, table_handler_state.iceberg_snapshot_result_consumed, table_handler_state.iceberg_snapshot_ongoing) {
                                 if let Some(iceberg_snapshot_payload) = iceberg_snapshot_payload {
                                     table_handler_event_sender.send(TableEvent::RegularIcebergSnapshot {
                                         iceberg_snapshot_payload,
@@ -526,6 +527,26 @@ impl TableHandler {
                                 }
                             }
                         }
+                        TableEvent::FlushResult { xact_id, flush_result } => {
+                            match flush_result {
+                                Some(Ok(disk_slice)) => {
+                                    if let Some(lsn) = disk_slice.lsn() {
+                                        table.remove_pending_flush_lsn(lsn);
+                                    }
+                                    if let Some(xact_id) = xact_id {
+                                        table.apply_stream_flush_result(xact_id, disk_slice);
+                                    } else {
+                                        table.apply_flush_result(disk_slice);
+                                    }
+                                }
+                                Some(Err(e)) => {
+                                    error!(error = ?e, "failed to flush disk slice");
+                                }
+                                None => {
+                                    error!("flush result is none");
+                                }
+                            }
+                        }
                         // ==============================
                         // Replication events
                         // ==============================
@@ -600,8 +621,8 @@ impl TableHandler {
                     Some(xact_id) => {
                         let res = table.append_in_stream_batch(row, xact_id);
                         if table.should_transaction_flush(xact_id) {
-                            if let Err(e) = table.flush_stream(xact_id, None).await {
-                                error!(error = %e, "flush failed in append");
+                            if let Err(e) = table.flush_stream(xact_id, None) {
+                                error!(error = %e, "failed to flush stream");
                             }
                         }
                         res
@@ -645,8 +666,8 @@ impl TableHandler {
                 .await;
             }
             TableEvent::StreamFlush { xact_id, .. } => {
-                if let Err(e) = table.flush_stream(xact_id, None).await {
-                    error!(error = %e, "stream flush failed");
+                if let Err(e) = table.flush_stream(xact_id, None) {
+                    error!(error = %e, "failed to flush stream");
                 }
             }
             _ => {
@@ -679,8 +700,16 @@ impl TableHandler {
         // 1. force snapshot is requested
         // and 2. LSN which meets force snapshot requirement has appeared, before that we still allow buffering
         // and 3. there's no snapshot creation operation ongoing
+        // and 4. there's no pending flush LSNs < lsn
 
-        let should_force_snapshot = table_handler_state.should_force_snapshot_by_commit_lsn(lsn);
+        let min_pending_flush_lsn = table.get_min_pending_flush_lsn();
+        let should_force_snapshot = TableHandlerState::should_force_snapshot_by_commit_lsn(
+            lsn,
+            min_pending_flush_lsn,
+            &table_handler_state.table_maintenance_process_status,
+            table_handler_state.largest_force_snapshot_lsn,
+            table_handler_state.mooncake_snapshot_ongoing,
+        );
 
         match xact_id {
             Some(xact_id) => {
@@ -688,7 +717,7 @@ impl TableHandler {
                 if let Some(last_unflushed_commit_lsn) =
                     table_handler_state.last_unflushed_commit_lsn
                 {
-                    if let Err(e) = table.flush(last_unflushed_commit_lsn).await {
+                    if let Err(e) = table.flush(last_unflushed_commit_lsn) {
                         error!(error = %e, "flush non-streaming writes failed in LSN {lsn}");
                     }
                     table_handler_state.last_unflushed_commit_lsn = None;
@@ -702,7 +731,7 @@ impl TableHandler {
                         return;
                     }
                 }
-                if let Err(e) = table.commit_transaction_stream(xact_id, lsn).await {
+                if let Err(e) = table.commit_transaction_stream(xact_id, lsn) {
                     error!(error = %e, "stream commit flush failed");
                 }
             }
@@ -710,7 +739,7 @@ impl TableHandler {
                 table.commit(lsn);
                 if table.should_flush() || should_force_snapshot || force_flush_requested {
                     table_handler_state.last_unflushed_commit_lsn = None;
-                    if let Err(e) = table.flush(lsn).await {
+                    if let Err(e) = table.flush(lsn) {
                         error!(error = %e, "flush failed in commit");
                     }
                 }

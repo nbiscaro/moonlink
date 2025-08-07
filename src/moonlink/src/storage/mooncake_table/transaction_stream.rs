@@ -27,6 +27,8 @@ pub(super) struct TransactionStreamState {
     /// Number of pending flushes for this transaction.
     /// Only safe to remove transaction stream state when there are no pending flushes.
     pending_flush_count: u32,
+    /// Commit LSN for this transaction, set when transaction is committed.
+    commit_lsn: Option<u64>,
 }
 
 /// Determines the state of a transaction stream.
@@ -105,6 +107,7 @@ impl TransactionStreamState {
             new_record_batches: hashbrown::HashMap::new(),
             status: TransactionStreamStatus::Pending,
             pending_flush_count: 0,
+            commit_lsn: None,
         }
     }
 }
@@ -296,15 +299,11 @@ impl MooncakeTable {
 
     /// Drains the current mem slice and prepares a disk slice for flushing.
     /// Adds current mem slice batches and indices to the stream state.
-    pub fn prepare_stream_disk_slice(
+    pub(super) fn prepare_stream_disk_slice(
         &mut self,
-        xact_id: u32,
+        stream_state: &mut TransactionStreamState,
         lsn: Option<u64>,
     ) -> Result<DiskSliceWriter> {
-        let stream_state = self
-            .transaction_stream_states
-            .get_mut(&xact_id)
-            .expect("Stream state not found for xact_id: {xact_id}");
         let next_file_id = self.next_file_id;
         self.next_file_id += 1;
 
@@ -343,36 +342,36 @@ impl MooncakeTable {
         Ok(disk_slice)
     }
 
-    /// Flushes a disk slice for streaming transaction.
-    /// Increments the pending flush count for this transaction.
-    pub async fn flush_stream_disk_slice(
-        &mut self,
-        xact_id: u32,
-        disk_slice: &mut DiskSliceWriter,
-    ) -> Result<()> {
-        let stream_state = self
-            .transaction_stream_states
-            .get_mut(&xact_id)
-            .expect("Stream state not found for xact_id: {xact_id}");
-        stream_state.pending_flush_count += 1;
-        disk_slice.write().await?;
-        Ok(())
-    }
-
     /// Applies the result of a streaming flush to the stream state.
     /// Decrements the pending flush count for this transaction.
     /// Handles commit and abort cleanup.
     /// Removes in memory indices and record batches from the stream state.
     pub fn apply_stream_flush_result(&mut self, xact_id: u32, mut disk_slice: DiskSliceWriter) {
+        if let Some(lsn) = disk_slice.lsn() {
+            self.pending_flush_lsns.remove(&lsn);
+            self.set_next_flush_lsn(lsn);
+        }
+
         let stream_state = self
             .transaction_stream_states
             .get_mut(&xact_id)
             .expect("Stream state not found for xact_id: {xact_id}");
+
         stream_state.pending_flush_count -= 1;
 
         // Transaction committed while stream was flushing. Add disk slice to snapshot task and let snapshot handle it.
         // Drop the stream state since the transaction is over.
         if stream_state.status == TransactionStreamStatus::Committed {
+            let commit_lsn = stream_state
+                .commit_lsn
+                .expect("Committed transaction must have commit_lsn");
+
+            // If there's no writer_lsn, it means this is a periodic flush before commit.
+            // In this case we assign the commit_lsn as writer_lsn.
+            if disk_slice.writer_lsn.is_none() {
+                disk_slice.writer_lsn = Some(commit_lsn);
+            }
+
             self.next_snapshot_task.new_disk_slices.push(disk_slice);
             if stream_state.pending_flush_count == 0 {
                 self.transaction_stream_states.remove(&xact_id);
@@ -424,27 +423,28 @@ impl MooncakeTable {
         }
     }
 
-    pub async fn flush_stream(&mut self, xact_id: u32, lsn: Option<u64>) -> Result<()> {
-        let mut disk_slice = self.prepare_stream_disk_slice(xact_id, lsn)?;
-        self.flush_stream_disk_slice(xact_id, &mut disk_slice)
-            .await?;
-        if let Some(lsn) = lsn {
-            self.next_snapshot_task.new_flush_lsn = Some(lsn);
-        }
-        self.apply_stream_flush_result(xact_id, disk_slice);
+    pub fn flush_stream(&mut self, xact_id: u32, lsn: Option<u64>) -> Result<()> {
+        // Temporarily remove to drop reference to self
+        let mut stream_state = self
+            .transaction_stream_states
+            .remove(&xact_id)
+            .expect("Stream state not found for xact_id: {xact_id}");
+
+        let mut disk_slice = self.prepare_stream_disk_slice(&mut stream_state, lsn)?;
+
+        let table_notify_tx = self.table_notify.as_ref().unwrap().clone();
+
+        stream_state.pending_flush_count += 1;
+
+        self.flush_disk_slice(&mut disk_slice, table_notify_tx, Some(xact_id));
+
+        // Add back stream state
+        self.transaction_stream_states.insert(xact_id, stream_state);
 
         Ok(())
     }
 
-    /// Commit a transaction stream.
-    /// Flushes any remaining rows from stream mem slice
-    /// Adds all in mem batches and indices to next snapshot task
-    /// Updates deletion records
-    /// Enqueues `TransactionStreamOutput::Commit` for snapshot task
-    pub async fn commit_transaction_stream(&mut self, xact_id: u32, lsn: u64) -> Result<()> {
-        self.flush_stream(xact_id, Some(lsn)).await?;
-
-        // Now remove and process the state
+    pub fn commit_transaction_stream_impl(&mut self, xact_id: u32, lsn: u64) -> Result<()> {
         let stream_state = self
             .transaction_stream_states
             .get_mut(&xact_id)
@@ -512,8 +512,20 @@ impl MooncakeTable {
             .push(TransactionStreamOutput::Commit(commit));
 
         stream_state.status = TransactionStreamStatus::Committed;
+        // We may have pending flushes that we need to stamp with this commit LSN so we store it in stream_state.
+        stream_state.commit_lsn = Some(lsn);
 
         Ok(())
+    }
+
+    /// Commit a transaction stream.
+    /// Flushes any remaining rows from stream mem slice
+    /// Adds all in mem batches and indices to next snapshot task
+    /// Updates deletion records
+    /// Enqueues `TransactionStreamOutput::Commit` for snapshot task
+    pub fn commit_transaction_stream(&mut self, xact_id: u32, lsn: u64) -> Result<()> {
+        self.flush_stream(xact_id, Some(lsn))?;
+        self.commit_transaction_stream_impl(xact_id, lsn)
     }
 }
 

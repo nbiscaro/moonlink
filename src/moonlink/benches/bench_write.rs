@@ -91,8 +91,7 @@ fn bench_write(c: &mut Criterion) {
                         values: row.values.clone(),
                     });
                 }
-                let handle = table.flush(100000);
-                handle.await.unwrap();
+                let _ = table.flush(100000);
             });
         });
     });
@@ -143,8 +142,7 @@ fn bench_write(c: &mut Criterion) {
                         1,
                     );
                 }
-                let handle = table.flush(100000);
-                handle.await.unwrap();
+                let _ = table.flush(100000);
             });
         });
     });
@@ -196,7 +194,7 @@ fn bench_write(c: &mut Criterion) {
                             1,
                         );
                     }
-                    table.flush_stream(1, None).await.unwrap();
+                    table.flush_stream(1, None).unwrap();
                 });
                 table
             },
@@ -212,9 +210,7 @@ fn bench_write(c: &mut Criterion) {
                             )
                             .await;
                     }
-                    table.flush_stream(1, None).await.unwrap();
-                    //let handle = table.create_snapshot();
-                    //let _ = handle.unwrap().await.unwrap();
+                    table.flush_stream(1, None).unwrap();
                 });
             },
             BatchSize::PerIteration,

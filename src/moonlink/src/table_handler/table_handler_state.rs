@@ -299,20 +299,31 @@ impl TableHandlerState {
     }
 
     /// Return whether should force to create a mooncake and iceberg snapshot, based on the new coming commit LSN.
-    pub(crate) fn should_force_snapshot_by_commit_lsn(&self, commit_lsn: u64) -> bool {
+    pub(crate) fn should_force_snapshot_by_commit_lsn(
+        commit_lsn: u64,
+        min_pending_flush_lsn: u64,
+        table_maintenance_process_status: &MaintenanceProcessStatus,
+        largest_force_snapshot_lsn: Option<u64>,
+        mooncake_snapshot_ongoing: bool,
+    ) -> bool {
         // No force snasphot if already mooncake snapshot ongoing.
-        if self.mooncake_snapshot_ongoing {
+        if mooncake_snapshot_ongoing {
+            return false;
+        }
+
+        // No force snapshot if pending flush LSNs < commit LSN.
+        if min_pending_flush_lsn < commit_lsn {
             return false;
         }
 
         // Case-1: there're completed but not persisted table maintenance changes.
-        if self.table_maintenance_process_status == MaintenanceProcessStatus::ReadyToPersist {
+        if *table_maintenance_process_status == MaintenanceProcessStatus::ReadyToPersist {
             return true;
         }
 
         // Case-2: there're pending force snapshot requests.
-        if let Some(largest_requested_lsn) = self.largest_force_snapshot_lsn {
-            return largest_requested_lsn <= commit_lsn && !self.mooncake_snapshot_ongoing;
+        if let Some(largest_requested_lsn) = largest_force_snapshot_lsn {
+            return largest_requested_lsn <= commit_lsn && !mooncake_snapshot_ongoing;
         }
 
         false
@@ -422,10 +433,17 @@ impl TableHandlerState {
     ///
     /// Used to decide whether we could create an iceberg snapshot.
     /// The completion of an iceberg snapshot is **NOT** marked as the finish of snapshot thread, but the handling of its results.
-    /// We can only create a new iceberg snapshot when (1) there's no ongoing iceberg snapshot, (2) previous snapshot results have been acknowledged.
+    /// We can only create a new iceberg snapshot when (1) there's no ongoing iceberg snapshot, (2) previous snapshot results have been acknowledged, (3) there's no pending flush LSNs < flush_lsn
     ///
-    pub(crate) fn can_initiate_iceberg_snapshot(&self) -> bool {
-        self.iceberg_snapshot_result_consumed && !self.iceberg_snapshot_ongoing
+    pub(crate) fn can_initiate_iceberg_snapshot(
+        flush_lsn: u64,
+        min_pending_flush_lsn: u64,
+        iceberg_snapshot_result_consumed: bool,
+        iceberg_snapshot_ongoing: bool,
+    ) -> bool {
+        iceberg_snapshot_result_consumed
+            && !iceberg_snapshot_ongoing
+            && flush_lsn < min_pending_flush_lsn
     }
 
     pub(crate) fn reset_iceberg_state_at_mooncake_snapshot(&mut self) {

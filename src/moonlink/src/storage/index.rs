@@ -20,16 +20,19 @@ pub struct MooncakeIndex {
 /// Type for primary keys
 pub type PrimaryKey = u64;
 
+#[derive(Clone, Debug)]
 pub struct SinglePrimitiveKey {
     hash: PrimaryKey,
     location: RecordLocation,
 }
+#[derive(Clone, Debug)]
 pub struct KeyWithIdentity {
     hash: PrimaryKey,
     identity: MoonlinkRow,
     location: RecordLocation,
 }
 /// Index containing records in memory
+#[derive(Clone, Debug)]
 pub enum MemIndex {
     SinglePrimitive(hashbrown::HashTable<SinglePrimitiveKey>),
     Key(hashbrown::HashTable<KeyWithIdentity>),
