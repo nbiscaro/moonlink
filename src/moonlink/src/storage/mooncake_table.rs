@@ -185,6 +185,12 @@ impl Snapshot {
     }
 }
 
+struct RecordBatchWithDeletionVector {
+    batch_id: u64,
+    record_batch: Arc<RecordBatch>,
+    deletion_vector: Option<BatchDeletionVector>,
+}
+
 #[derive(Default)]
 pub struct SnapshotTask {
     /// Mooncake table config.
@@ -196,7 +202,7 @@ pub struct SnapshotTask {
     disk_file_lsn_map: HashMap<FileId, u64>,
     new_deletions: Vec<RawDeletionRecord>,
     /// Pair of <batch id, record batch, optional deletion vector for streaming batches>.
-    new_record_batches: Vec<(u64, Arc<RecordBatch>, Option<BatchDeletionVector>)>,
+    new_record_batches: Vec<RecordBatchWithDeletionVector>,
     new_rows: Option<SharedRowBufferSnapshot>,
     new_mem_indices: Vec<Arc<MemIndex>>,
     /// Assigned (non-zero) after a commit event.
@@ -711,7 +717,11 @@ impl MooncakeTable {
         if let Some(batch) = self.mem_slice.append(lookup_key, row, identity_for_key)? {
             self.next_snapshot_task
                 .new_record_batches
-                .push((batch.0, batch.1, None));
+                .push(RecordBatchWithDeletionVector {
+                    batch_id: batch.0,
+                    record_batch: batch.1,
+                    deletion_vector: None,
+                });
         }
         Ok(())
     }
@@ -773,7 +783,11 @@ impl MooncakeTable {
         if let Some(batch) = new_batch {
             self.next_snapshot_task
                 .new_record_batches
-                .push((batch.0, batch.1, None));
+                .push(RecordBatchWithDeletionVector {
+                    batch_id: batch.0,
+                    record_batch: batch.1,
+                    deletion_vector: None,
+                });
         }
         self.next_snapshot_task.new_mem_indices.push(index.clone());
 

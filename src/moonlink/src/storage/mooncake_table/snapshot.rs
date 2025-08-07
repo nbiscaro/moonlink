@@ -615,15 +615,15 @@ impl SnapshotTableState {
         let incoming = take(&mut task.new_record_batches);
         let (streaming_batches, mut non_streaming_batches): (Vec<_>, Vec<_>) = incoming
             .into_iter()
-            .partition(|(id, _, _)| *id < (1u64 << 63));
+            .partition(|batch| batch.batch_id < (1u64 << 63));
 
         if !non_streaming_batches.is_empty() {
             // close previously‐open batch
             assert!(self.batches.values().last().unwrap().data.is_none());
             // Use the ID from the incoming batches rather than the counter, since the counter may have been further advanced elsewhere.
-            let next_id = non_streaming_batches.last().unwrap().0 + 1;
+            let next_id = non_streaming_batches.last().unwrap().batch_id + 1;
             self.batches.last_entry().unwrap().get_mut().data =
-                Some(non_streaming_batches.remove(0).1.clone());
+                Some(non_streaming_batches.remove(0).record_batch.clone());
 
             // start a fresh empty batch after the newest data
             let batch_size = self.current_snapshot.metadata.config.batch_size;
@@ -637,26 +637,27 @@ impl SnapshotTableState {
 
         // Add completed batches
         // Assert that no incoming batch ID is already present in the map.
-        for (id, rb, deletion_vector) in streaming_batches
+        for batch in streaming_batches
             .into_iter()
             .chain(non_streaming_batches.into_iter())
         {
-            let deletions = match deletion_vector {
+            let deletions = match batch.deletion_vector {
                 Some(dv) => dv, // Use the deletion vector from streaming transaction
-                None => BatchDeletionVector::new(rb.num_rows()), // Create fresh deletion vector for non-streaming
+                None => BatchDeletionVector::new(batch.record_batch.num_rows()), // Create fresh deletion vector for non-streaming
             };
 
             assert!(
                 self.batches
                     .insert(
-                        id,
+                        batch.batch_id,
                         InMemoryBatch {
-                            data: Some(rb.clone()),
+                            data: Some(batch.record_batch.clone()),
                             deletions,
                         }
                     )
                     .is_none(),
-                "Batch ID {id} already exists in self.batches"
+                "Batch ID {} already exists in self.batches",
+                batch.batch_id
             );
         }
     }

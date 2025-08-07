@@ -467,11 +467,13 @@ impl MooncakeTable {
 
         // Add stream record batches to next snapshot task
         for (id, batch) in stream_state.new_record_batches.iter() {
-            self.next_snapshot_task.new_record_batches.push((
-                *id,
-                batch.data.as_ref().unwrap().clone(),
-                Some(batch.deletions.clone()),
-            ));
+            self.next_snapshot_task
+                .new_record_batches
+                .push(RecordBatchWithDeletionVector {
+                    batch_id: *id,
+                    record_batch: batch.data.as_ref().unwrap().clone(),
+                    deletion_vector: Some(batch.deletions.clone()),
+                });
         }
         // Add stream in mem indices to next snapshot task
         self.next_snapshot_task.new_mem_indices.extend(
