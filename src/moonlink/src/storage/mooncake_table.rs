@@ -453,8 +453,8 @@ pub struct MooncakeTable {
     /// WAL manager, used to persist WAL events.
     wal_manager: WalManager,
 
-    /// LSN of pending flushes.
-    pub pending_flush_lsns: BTreeSet<u64>,
+    /// LSN of ongoing flushes.
+    pub ongoing_flush_lsns: BTreeSet<u64>,
 }
 
 impl MooncakeTable {
@@ -550,7 +550,7 @@ impl MooncakeTable {
             last_iceberg_snapshot_lsn,
             table_notify: None,
             wal_manager,
-            pending_flush_lsns: BTreeSet::new(),
+            ongoing_flush_lsns: BTreeSet::new(),
         })
     }
 
@@ -877,7 +877,7 @@ impl MooncakeTable {
 
         let table_notify_tx = self.table_notify.as_ref().unwrap().clone();
 
-        if self.mem_slice.is_empty() || self.pending_flush_lsns.contains(&lsn) {
+        if self.mem_slice.is_empty() || self.ongoing_flush_lsns.contains(&lsn) {
             self.set_next_flush_lsn(lsn);
             tokio::task::spawn(async move {
                 table_notify_tx
@@ -907,7 +907,7 @@ impl MooncakeTable {
     }
 
     pub fn get_min_pending_flush_lsn(&self) -> u64 {
-        self.pending_flush_lsns
+        self.ongoing_flush_lsns
             .iter()
             .next()
             .copied()
@@ -916,14 +916,14 @@ impl MooncakeTable {
 
     pub fn insert_pending_flush_lsn(&mut self, lsn: u64) {
         assert!(
-            self.pending_flush_lsns.insert(lsn),
+            self.ongoing_flush_lsns.insert(lsn),
             "LSN {lsn} already in pending flush LSNs"
         );
     }
 
     pub fn remove_pending_flush_lsn(&mut self, lsn: u64) {
         assert!(
-            self.pending_flush_lsns.remove(&lsn),
+            self.ongoing_flush_lsns.remove(&lsn),
             "LSN {lsn} not found in pending flush LSNs"
         );
     }
