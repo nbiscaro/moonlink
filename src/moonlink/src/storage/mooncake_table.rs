@@ -907,6 +907,7 @@ impl MooncakeTable {
         }
     }
 
+    // We fallback to u64::MAX if there are no pending flush LSNs so that the LSN is always greater than the flush LSN and the iceberg snapshot can proceed.
     pub fn get_min_pending_flush_lsn(&self) -> u64 {
         self.ongoing_flush_lsns
             .iter()
