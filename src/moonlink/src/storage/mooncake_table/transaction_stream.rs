@@ -348,7 +348,7 @@ impl MooncakeTable {
     /// Removes in memory indices and record batches from the stream state.
     pub fn apply_stream_flush_result(&mut self, xact_id: u32, mut disk_slice: DiskSliceWriter) {
         if let Some(lsn) = disk_slice.lsn() {
-            self.pending_flush_lsns.remove(&lsn);
+            self.remove_pending_flush_lsn(lsn);
             self.set_next_flush_lsn(lsn);
         }
 

@@ -857,7 +857,7 @@ impl MooncakeTable {
         let lsn = disk_slice
             .lsn()
             .expect("LSN should never be none for non streaming flush");
-        self.pending_flush_lsns.remove(&lsn);
+        self.remove_pending_flush_lsn(lsn);
         self.set_next_flush_lsn(lsn);
         self.next_snapshot_task.new_disk_slices.push(disk_slice);
     }
