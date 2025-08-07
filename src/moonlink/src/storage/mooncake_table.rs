@@ -698,11 +698,6 @@ impl MooncakeTable {
         self.last_iceberg_snapshot_lsn
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_iceberg_snapshot_lsn(&mut self, lsn: u64) {
-        self.last_iceberg_snapshot_lsn = Some(lsn);
-    }
-
     pub(crate) fn get_state_for_reader(
         &self,
     ) -> (Arc<RwLock<SnapshotTableState>>, watch::Receiver<u64>) {

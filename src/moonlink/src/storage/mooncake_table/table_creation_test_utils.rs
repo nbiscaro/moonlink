@@ -30,6 +30,13 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 
+impl MooncakeTable {
+    #[cfg(test)]
+    pub(crate) fn set_iceberg_snapshot_lsn(&mut self, lsn: u64) {
+        self.last_iceberg_snapshot_lsn = Some(lsn);
+    }
+}
+
 /// Test util function to get iceberg table config for local filesystem.
 pub(crate) fn get_iceberg_table_config(temp_dir: &TempDir) -> IcebergTableConfig {
     let root_directory = temp_dir.path().to_str().unwrap().to_string();
