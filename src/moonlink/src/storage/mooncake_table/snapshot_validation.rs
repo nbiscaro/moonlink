@@ -29,13 +29,13 @@ impl SnapshotTableState {
                 // Force snapshot could flush as long as the table at a clean state (aka, no uncommitted states), possible to go without commit at current snapshot iteration.
                 if opt.force_create {
                     assert!(
-                        task.new_commit_lsn == 0 || task.new_commit_lsn >= new_flush_lsn,
+                        task.commit_lsn_baseline == 0 || task.commit_lsn_baseline >= new_flush_lsn,
                         "New commit LSN is {}, new flush LSN is {}",
-                        task.new_commit_lsn,
+                        task.commit_lsn_baseline,
                         new_flush_lsn
                     );
                 } else {
-                    ma::assert_ge!(task.new_commit_lsn, new_flush_lsn);
+                    ma::assert_ge!(task.commit_lsn_baseline, new_flush_lsn);
                 }
             }
         }

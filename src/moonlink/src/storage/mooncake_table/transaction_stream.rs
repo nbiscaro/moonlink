@@ -483,7 +483,7 @@ impl MooncakeTable {
                 .iter()
                 .map(|ptr| ptr.arc_ptr()),
         );
-        self.next_snapshot_task.new_commit_lsn = lsn;
+        self.next_snapshot_task.commit_lsn_baseline = lsn;
 
         // We update our delete records with the last lsn of the transaction
         // Note that in the stream case we dont have this until commit time

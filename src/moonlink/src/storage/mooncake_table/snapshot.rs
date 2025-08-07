@@ -526,8 +526,8 @@ impl SnapshotTableState {
             self.current_snapshot.flush_lsn = Some(new_flush_lsn);
         }
 
-        if task.new_commit_lsn != 0 {
-            self.current_snapshot.snapshot_version = task.new_commit_lsn;
+        if task.commit_lsn_baseline != 0 {
+            self.current_snapshot.snapshot_version = task.commit_lsn_baseline;
         }
         if let Some(cp) = task.new_commit_point {
             self.last_commit = cp;
@@ -914,7 +914,7 @@ impl SnapshotTableState {
 
         for mut entry in take(&mut self.uncommitted_deletion_log) {
             let deletion = entry.take().unwrap();
-            if deletion.lsn < task.new_commit_lsn {
+            if deletion.lsn < task.commit_lsn_baseline {
                 self.commit_deletion(deletion);
             } else {
                 still_uncommitted.push(Some(deletion));
@@ -951,7 +951,7 @@ impl SnapshotTableState {
                 true
             }
         });
-        self.add_processed_deletion(already_processed, task.new_commit_lsn);
+        self.add_processed_deletion(already_processed, task.commit_lsn_baseline);
         new_deletions.sort_by_key(|deletion| deletion.lookup_key);
         if new_deletions.is_empty() {
             return;
@@ -991,7 +991,7 @@ impl SnapshotTableState {
                     &task.disk_file_lsn_map,
                 )
                 .await;
-            self.add_processed_deletion(processed_deletions, task.new_commit_lsn);
+            self.add_processed_deletion(processed_deletions, task.commit_lsn_baseline);
         }
     }
 }

@@ -206,7 +206,8 @@ pub struct SnapshotTask {
     new_rows: Option<SharedRowBufferSnapshot>,
     new_mem_indices: Vec<Arc<MemIndex>>,
     /// Assigned (non-zero) after a commit event.
-    new_commit_lsn: u64,
+    /// Inherits the previous snapshot tasks commit LSN baseline on snapshot.
+    commit_lsn_baseline: u64,
     /// Assigned at a flush operation.
     new_flush_lsn: Option<u64>,
     new_commit_point: Option<RecordLocation>,
@@ -243,7 +244,7 @@ impl SnapshotTask {
             new_record_batches: Vec::new(),
             new_rows: None,
             new_mem_indices: Vec::new(),
-            new_commit_lsn: 0,
+            commit_lsn_baseline: 0,
             new_flush_lsn: None,
             new_commit_point: None,
             new_streaming_xact: Vec::new(),
@@ -289,7 +290,7 @@ impl SnapshotTask {
 
     pub fn should_create_snapshot(&self) -> bool {
         // If mooncake has new transaction commits.
-        self.new_commit_lsn > 0
+        self.commit_lsn_baseline > 0
             || self.force_empty_iceberg_payload
         // If mooncake table accumulated large enough writes.
             || !self.new_disk_slices.is_empty()
@@ -743,7 +744,7 @@ impl MooncakeTable {
     }
 
     pub fn commit(&mut self, lsn: u64) {
-        self.next_snapshot_task.new_commit_lsn = lsn;
+        self.next_snapshot_task.commit_lsn_baseline = lsn;
         self.next_snapshot_task.new_commit_point = Some(self.mem_slice.get_commit_check_point());
         assert!(
             self.next_snapshot_task.new_deletions.is_empty()
@@ -945,7 +946,8 @@ impl MooncakeTable {
         self.next_snapshot_task = SnapshotTask::new(self.metadata.config.clone());
         // Carry forward the commit baseline
         // This is important if we have a pending flush that will be added to the next snapshot task.
-        self.next_snapshot_task.new_commit_lsn = next_snapshot_task.new_commit_lsn;
+        // Otherwise, if we simply reset the `commit_lsn_baseline` to zero, the ongoing flush will finish and set `flush_lsn`. Then we have a snapshot task where `commit_lsn` < `flush_lsn` which breaks our invariant.
+        self.next_snapshot_task.commit_lsn_baseline = next_snapshot_task.commit_lsn_baseline;
 
         let cur_snapshot = self.snapshot.clone();
 
