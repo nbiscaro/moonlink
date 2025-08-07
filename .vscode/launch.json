@@ -1,0 +1,379 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'moonlink'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=moonlink"
+                ],
+                "filter": {
+                    "name": "moonlink",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug benchmark 'bench_write'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bench=bench_write",
+                    "--package=moonlink"
+                ],
+                "filter": {
+                    "name": "bench_write",
+                    "kind": "bench"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug benchmark 'microbench_index_stress'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bench=microbench_index_stress",
+                    "--package=moonlink"
+                ],
+                "filter": {
+                    "name": "microbench_index_stress",
+                    "kind": "bench"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug benchmark 'microbench_row_comparison'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bench=microbench_row_comparison",
+                    "--package=moonlink"
+                ],
+                "filter": {
+                    "name": "microbench_row_comparison",
+                    "kind": "bench"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug benchmark 'microbench_write_mooncake_table'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bench=microbench_write_mooncake_table",
+                    "--package=moonlink"
+                ],
+                "filter": {
+                    "name": "microbench_write_mooncake_table",
+                    "kind": "bench"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'moonlink_backend'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=moonlink_backend"
+                ],
+                "filter": {
+                    "name": "moonlink_backend",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'common'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=common",
+                    "--package=moonlink_backend"
+                ],
+                "filter": {
+                    "name": "common",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'test_backend'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=test_backend",
+                    "--package=moonlink_backend"
+                ],
+                "filter": {
+                    "name": "test_backend",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'test_initial_copy'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=test_initial_copy",
+                    "--package=moonlink_backend"
+                ],
+                "filter": {
+                    "name": "test_initial_copy",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'moonlink_connectors'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=moonlink_connectors"
+                ],
+                "filter": {
+                    "name": "moonlink_connectors",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'moonlink_metadata_store'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=moonlink_metadata_store"
+                ],
+                "filter": {
+                    "name": "moonlink_metadata_store",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'test_pg_metadata_store'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=test_pg_metadata_store",
+                    "--package=moonlink_metadata_store"
+                ],
+                "filter": {
+                    "name": "test_pg_metadata_store",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'test_pg_metadata_store_utils'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=test_pg_metadata_store_utils",
+                    "--package=moonlink_metadata_store"
+                ],
+                "filter": {
+                    "name": "test_pg_metadata_store_utils",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'moonlink_rpc'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=moonlink_rpc"
+                ],
+                "filter": {
+                    "name": "moonlink_rpc",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'moonlink_service'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=moonlink_service"
+                ],
+                "filter": {
+                    "name": "moonlink_service",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'moonlink_service'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=moonlink_service",
+                    "--package=moonlink_service"
+                ],
+                "filter": {
+                    "name": "moonlink_service",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'moonlink_service'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=moonlink_service",
+                    "--package=moonlink_service"
+                ],
+                "filter": {
+                    "name": "moonlink_service",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug table_handler::chaos_test::test_chaos_on_local_fs_with_no_background_maintenance in moonlink",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--features=chaos-test",
+                    "--package=moonlink"
+                ]
+            },
+            "args": [
+                "table_handler::chaos_test::test_chaos_on_local_fs_with_no_background_maintenance",
+                "--nocapture",
+                "--exact"
+            ],
+            "env": {
+                "RUST_BACKTRACE": "1"
+            },
+            "cwd": "${workspaceFolder}",
+            "sourceLanguages": [
+                "rust"
+            ]
+        },
+        {
+            "name": "Debug all chaos tests in moonlink",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--features=chaos-test",
+                    "--package=moonlink"
+                ]
+            },
+            "args": [
+                "test_chaos",
+                "--nocapture"
+            ],
+            "env": {
+                "RUST_BACKTRACE": "1"
+            },
+            "cwd": "${workspaceFolder}",
+            "sourceLanguages": [
+                "rust"
+            ]
+        }
+    ]
+}

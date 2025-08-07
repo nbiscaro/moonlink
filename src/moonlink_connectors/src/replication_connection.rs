@@ -515,6 +515,15 @@ async fn run_event_loop(
 ) -> Result<()> {
     pin!(connection);
 
+    // Start profiling if enabled
+    let guard = if std::env::var("MOONLINK_PROFILE_INGEST").is_ok() {
+        pprof::ProfilerGuard::new(100).ok()
+    } else {
+        None
+    };
+    let mut event_count = 0u64;
+    const MAX_EVENTS: u64 = 1_000_000;
+
     // Create stream while driving connection
     let stream = tokio::select! {
         s = PostgresSource::create_cdc_stream(client, cfg) => s?,
@@ -571,7 +580,7 @@ async fn run_event_loop(
                     break;
                 }
             },
-            event = StreamExt::next(&mut stream) => {
+                                    event = StreamExt::next(&mut stream) => {
                 let Some(event_result) = event else {
                     error!("replication stream ended unexpectedly");
                     break;
@@ -597,12 +606,35 @@ async fn run_event_loop(
                             sink.alter_table(src_table_id, &table_schema).await;
                             stream.as_mut().add_table_schema(table_schema);
                         }
+
+                        // Count events and break after limit for profiling
+                        if guard.is_some() {
+                            event_count += 1;
+                            if event_count >= MAX_EVENTS {
+                                debug!(event_count, "reached max events for profiling, stopping");
+                                break;
+                            }
+                        }
                     }
                 }
             }
             _ = &mut connection => {
                 error!("replication connection closed");
                 break;
+            }
+        }
+    }
+
+    // Generate flamegraph when profiling ends
+    if let Some(guard) = guard {
+        if let Ok(report) = guard.report().build() {
+            let filename = format!("ingest_flamegraph_{}_events.svg", event_count);
+            if let Ok(file) = std::fs::File::create(&filename) {
+                if let Err(e) = report.flamegraph(file) {
+                    warn!(error = ?e, filename, "failed to write flamegraph");
+                } else {
+                    debug!(filename, event_count, "flamegraph saved");
+                }
             }
         }
     }

@@ -34,6 +34,7 @@ storage-gcs = [
 bench = []
 
 chaos-test = ["function_name"]
+profiling = ["pprof"]
 
 [dependencies]
 ahash = "0.8.11"
@@ -63,6 +64,7 @@ num-bigint = { workspace = true }
 num-traits = { workspace = true }
 opendal = { workspace = true }
 parquet = { workspace = true }
+pprof = { version = "0.14", features = ["flamegraph"], optional = true }
 rand = { workspace = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
 roaring = { workspace = true }

@@ -1,5 +1,6 @@
 pub mod error;
 pub mod event_sync;
+pub mod profiling;
 pub mod row;
 mod storage;
 mod table_handler;

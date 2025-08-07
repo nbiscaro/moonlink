@@ -23,6 +23,7 @@ num-traits = { workspace = true }
 pg_escape = "0.1.1"
 pin-project-lite = "0.2"
 postgres-replication = { workspace = true }
+pprof = { version = "0.14", features = ["flamegraph", "criterion"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

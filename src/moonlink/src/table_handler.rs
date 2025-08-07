@@ -183,7 +183,7 @@ impl TableHandler {
         // Process events until the receiver is closed or a Shutdown event is received
         loop {
             tokio::select! {
-                // Process events from the queue
+                                // Process events from the queue
                 Some(event) = event_receiver.recv() => {
                     // Record event if requested.
                     if let Some(replay_tx) = &event_replay_tx {
