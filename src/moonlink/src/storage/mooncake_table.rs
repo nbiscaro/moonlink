@@ -816,15 +816,7 @@ impl MooncakeTable {
         table_notify_tx: Sender<TableEvent>,
         xact_id: Option<u32>,
     ) {
-        let path = self.metadata.path.clone();
-        let schema = self.metadata.schema.clone();
-        let batches = disk_slice.take_input_batches();
-        let lsn = disk_slice.lsn();
-        let next_file_id = disk_slice.table_auto_incr_id;
-        let old_index = disk_slice.old_index().clone();
-        let parquet_flush_threshold_size = self.metadata.config.disk_slice_parquet_file_size;
-
-        if let Some(lsn) = lsn {
+        if let Some(lsn) = disk_slice.lsn() {
             self.insert_pending_flush_lsn(lsn);
         } else {
             assert!(
@@ -833,16 +825,8 @@ impl MooncakeTable {
             );
         }
 
+        let mut disk_slice_clone = disk_slice.clone();
         tokio::task::spawn(async move {
-            let mut disk_slice_clone = DiskSliceWriter::new(
-                schema,
-                path,
-                batches,
-                lsn,
-                next_file_id,
-                old_index,
-                parquet_flush_threshold_size,
-            );
             let flush_result = disk_slice_clone.write().await;
             match flush_result {
                 Ok(()) => {

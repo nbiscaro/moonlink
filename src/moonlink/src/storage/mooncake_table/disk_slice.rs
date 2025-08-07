@@ -122,10 +122,6 @@ impl DiskSliceWriter {
         &self.batches
     }
 
-    pub(super) fn take_input_batches(&mut self) -> Vec<BatchEntry> {
-        std::mem::take(&mut self.batches)
-    }
-
     /// Get the list of files in the DiskSlice
     pub(super) fn output_files(&self) -> &[(MooncakeDataFileRef, DiskFileAttrs)] {
         self.files.as_slice()
