@@ -898,6 +898,7 @@ impl MooncakeTable {
         Ok(())
     }
 
+    // Sets the flush LSN for the next iceberg snapshot. Note that we can only set the flush LSN if it's greater than the current min pending flush LSN. Otherwise, LSNs will be persisted to iceberg in the wrong order.
     fn set_next_flush_lsn(&mut self, lsn: u64) {
         let min_pending_lsn = self.get_min_pending_flush_lsn();
         if lsn < min_pending_lsn {
