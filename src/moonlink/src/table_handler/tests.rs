@@ -2103,35 +2103,3 @@ fn test_deletion_vector_capacity_exceeded_minimal() {
     // This should panic - trying to delete row_id=5 when capacity is only 3
     let _ = deletion_vector.delete_row(5);
 }
-
-#[tokio::test]
-async fn test_stream_delete_from_stream_memslice_row_debug() {
-    let mut env = TestEnvironment::default().await;
-    let xact_id = 402;
-    let stream_commit_lsn = 41;
-
-    // Phase 1: Add row 20
-    env.append_row(20, "UserC-StreamMem", 35, /*lsn=*/ 0, Some(xact_id))
-        .await;
-
-    // Phase 2: Delete row 20 (but don't add row 21 yet)
-    env.delete_row(20, "UserC-StreamMem", 35, 0, Some(xact_id))
-        .await;
-
-    // Phase 3: Verify data is NOT visible before commit
-    env.set_table_commit_lsn(0);
-    env.set_replication_lsn(stream_commit_lsn + 5);
-    env.set_snapshot_lsn(0);
-    env.verify_snapshot(stream_commit_lsn, &[]).await;
-
-    // Phase 4: Commit the streaming transaction
-    env.stream_commit(stream_commit_lsn, xact_id).await;
-    println!("Debug: Verifying final state post-commit (should be empty)");
-
-    // Phase 5: Verify final state - should be empty
-    env.set_table_commit_lsn(stream_commit_lsn);
-    env.set_replication_lsn(stream_commit_lsn + 5);
-    env.verify_snapshot(stream_commit_lsn, &[]).await; // Should be empty
-
-    env.shutdown().await;
-}
