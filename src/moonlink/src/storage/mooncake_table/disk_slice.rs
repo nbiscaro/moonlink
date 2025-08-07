@@ -56,9 +56,17 @@ pub struct DiskSliceWriter {
 impl std::fmt::Debug for DiskSliceWriter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let batch_ids: Vec<u64> = self.batches.iter().map(|batch| batch.id).collect();
+        let num_data_files = self.files.len();
+        let num_index_blocks = self
+            .new_index
+            .as_ref()
+            .map(|idx| idx.index_blocks.len())
+            .unwrap_or(0);
         f.debug_struct("DiskSliceWriter")
             .field("batch_ids", &batch_ids)
             .field("lsn", &self.writer_lsn)
+            .field("num_data_files", &num_data_files)
+            .field("num_index_blocks", &num_index_blocks)
             .finish()
     }
 }
