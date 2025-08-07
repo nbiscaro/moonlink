@@ -269,7 +269,7 @@ impl TableHandler {
                         // So we block wait for asynchronous request completion.
                         TableEvent::DropTable => {
                             // Fast-path: no other concurrent events, directly clean up states and ack back.
-                            if table_handler_state.can_drop_table_now() {
+                            if table_handler_state.can_drop_table_now(table.has_ongoing_flush()) {
                                 drop_table(&mut table, event_sync_sender).await;
                                 return;
                             }
@@ -367,7 +367,7 @@ impl TableHandler {
                             table_handler_state.mooncake_snapshot_ongoing = false;
 
                             // Drop table if requested, and table at a clean state.
-                            if table_handler_state.special_table_state == SpecialTableState::DropTable && table_handler_state.can_drop_table_now() {
+                            if table_handler_state.special_table_state == SpecialTableState::DropTable && table_handler_state.can_drop_table_now(table.has_ongoing_flush()) {
                                 drop_table(&mut table, event_sync_sender).await;
                                 return;
                             }
@@ -468,7 +468,7 @@ impl TableHandler {
                             }
 
                             // Drop table if requested, and table at a clean state.
-                            if table_handler_state.special_table_state == SpecialTableState::DropTable && table_handler_state.can_drop_table_now() {
+                            if table_handler_state.special_table_state == SpecialTableState::DropTable && table_handler_state.can_drop_table_now(table.has_ongoing_flush()) {
                                 drop_table(&mut table, event_sync_sender).await;
                                 return;
                             }
@@ -477,7 +477,7 @@ impl TableHandler {
                             table.set_file_indices_merge_res(index_merge_result);
                             table_handler_state.mark_index_merge_completed().await;
                             // Check whether need to drop table.
-                            if table_handler_state.special_table_state == SpecialTableState::DropTable && table_handler_state.can_drop_table_now() {
+                            if table_handler_state.special_table_state == SpecialTableState::DropTable && table_handler_state.can_drop_table_now(table.has_ongoing_flush()) {
                                 drop_table(&mut table, event_sync_sender).await;
                                 return;
                             }
@@ -493,7 +493,7 @@ impl TableHandler {
                                 }
                             }
                             // Check whether need to drop table.
-                            if table_handler_state.special_table_state == SpecialTableState::DropTable && table_handler_state.can_drop_table_now() {
+                            if table_handler_state.special_table_state == SpecialTableState::DropTable && table_handler_state.can_drop_table_now(table.has_ongoing_flush()) {
                                 drop_table(&mut table, event_sync_sender).await;
                                 return;
                             }
@@ -517,7 +517,7 @@ impl TableHandler {
                                     table_handler_state.wal_persist_ongoing = false;
 
                                     // Check whether need to drop table.
-                                    if table_handler_state.special_table_state == SpecialTableState::DropTable && table_handler_state.can_drop_table_now() {
+                                    if table_handler_state.special_table_state == SpecialTableState::DropTable && table_handler_state.can_drop_table_now(table.has_ongoing_flush()) {
                                         drop_table(&mut table, event_sync_sender).await;
                                         return;
                                     }

@@ -928,6 +928,10 @@ impl MooncakeTable {
         );
     }
 
+    pub fn has_ongoing_flush(&self) -> bool {
+        !self.ongoing_flush_lsns.is_empty()
+    }
+
     // Create a snapshot of the last committed version, return current snapshot's version and payload to perform iceberg snapshot.
     fn create_snapshot_impl(&mut self, opt: SnapshotOption) {
         // Check invariant: there should be at most one ongoing mooncake snapshot.

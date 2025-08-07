@@ -335,7 +335,7 @@ impl TableHandlerState {
     }
 
     /// Return whether there's background tasks ongoing.
-    fn has_background_task_ongoing(&mut self) -> bool {
+    fn has_background_task_ongoing(&mut self, has_ongoing_flush: bool) -> bool {
         if self.mooncake_snapshot_ongoing {
             return false;
         }
@@ -346,6 +346,9 @@ impl TableHandlerState {
             return false;
         }
         if self.table_maintenance_process_status != MaintenanceProcessStatus::Unrequested {
+            return false;
+        }
+        if has_ongoing_flush {
             return false;
         }
         true
@@ -362,8 +365,8 @@ impl TableHandlerState {
 
     /// Return whether table handler could be dropped now.
     /// If there're any background activities ongoing, we cannot drop table immediately.
-    pub(crate) fn can_drop_table_now(&mut self) -> bool {
-        self.has_background_task_ongoing()
+    pub(crate) fn can_drop_table_now(&mut self, has_ongoing_flush: bool) -> bool {
+        self.has_background_task_ongoing(has_ongoing_flush)
     }
 
     /// ============================
