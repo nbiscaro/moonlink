@@ -449,7 +449,6 @@ impl SnapshotTableState {
         &mut self,
         mut task: SnapshotTask,
         opt: SnapshotOption,
-        min_pending_flush_lsn: u64,
     ) -> MooncakeSnapshotOutput {
         // Validate mooncake table operation invariants.
         self.validate_mooncake_table_invariants(&task, &opt);
@@ -566,7 +565,7 @@ impl SnapshotTableState {
         let flush_lsn = self.current_snapshot.flush_lsn.unwrap_or(0);
         if !opt.skip_iceberg_snapshot
             && (force_empty_iceberg_payload || flush_by_table_write)
-            && flush_lsn < min_pending_flush_lsn
+            && flush_lsn < task.min_ongoing_flush_lsn
         {
             // Getting persistable committed deletion logs is not cheap, which requires iterating through all logs,
             // so we only aggregate when there's committed deletion.
@@ -668,13 +667,17 @@ impl SnapshotTableState {
         let mut evicted_files = vec![];
 
         for mut slice in take(&mut task.new_disk_slices) {
-            let write_lsn = slice.lsn();
-            let lsn = write_lsn.expect("committed datafile should have a valid LSN");
+            let write_lsn = slice
+                .lsn()
+                .expect("committed datafile should have a valid LSN");
 
             // Register new files into mooncake snapshot, add it into cache, and record LSN map.
             for (file, file_attrs) in slice.output_files().iter() {
                 ma::assert_gt!(file_attrs.file_size, 0);
-                assert!(task.disk_file_lsn_map.insert(file.file_id(), lsn).is_none());
+                assert!(task
+                    .disk_file_lsn_map
+                    .insert(file.file_id(), write_lsn)
+                    .is_none());
                 let unique_file_id = self.get_table_unique_file_id(file.file_id());
                 let (cache_handle, cur_evicted_files) = self
                     .object_storage_cache
@@ -707,12 +710,13 @@ impl SnapshotTableState {
 
             // remap deletions written *after* this slice’s LSN
             // We set to write_lsn - 1 to maintain consistency with deletion LSNs from the streaming case.
-            let cut = self.committed_deletion_log.partition_point(|d| {
-                d.lsn
-                    < write_lsn.expect(
-                        "Critical: LSN is None after it should have been updated by commit process",
-                    ) - 1
-            });
+            // In the case a streaming transaction commits before flush, we assign disk_slice.writer_lsn = commit_lsn.
+            // The corresponding deletions have lsn = commit_lsn - 1, so we need >= write_lsn - 1
+            // to ensure these deletions get remapped from memory to disk locations.
+            // Use wrapping_sub(1) for the special initial copy case where write_lsn is 0. In this case we still want to remap the deletion log.
+            let cut = self
+                .committed_deletion_log
+                .partition_point(|d| d.lsn < write_lsn.wrapping_sub(1));
 
             for deletion in self.committed_deletion_log[cut..].iter_mut() {
                 if let Some(RecordLocation::DiskFile(file_id, row_idx)) =

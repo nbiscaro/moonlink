@@ -208,6 +208,9 @@ pub struct SnapshotTask {
     /// Assigned (non-zero) after a commit event.
     /// Inherits the previous snapshot tasks commit LSN baseline on snapshot.
     commit_lsn_baseline: u64,
+    /// Commit LSN baseline of the previous snapshot task.
+    /// We use this to determine if commit_lsn_baseline has been updated.
+    prev_commit_lsn_baseline: u64,
     /// Assigned at a flush operation.
     new_flush_lsn: Option<u64>,
     new_commit_point: Option<RecordLocation>,
@@ -232,6 +235,9 @@ pub struct SnapshotTask {
     /// ---- States have been recorded by mooncake snapshot, and persisted into iceberg table ----
     /// These persisted items will be reflected to mooncake snapshot in the next invocation of periodic mooncake snapshot operation.
     iceberg_persisted_records: IcebergPersistedRecords,
+
+    /// Minimum LSN of ongoing flushes.
+    min_ongoing_flush_lsn: u64,
 }
 
 impl SnapshotTask {
@@ -245,6 +251,7 @@ impl SnapshotTask {
             new_rows: None,
             new_mem_indices: Vec::new(),
             commit_lsn_baseline: 0,
+            prev_commit_lsn_baseline: 0,
             new_flush_lsn: None,
             new_commit_point: None,
             new_streaming_xact: Vec::new(),
@@ -257,6 +264,7 @@ impl SnapshotTask {
             data_compaction_result: DataCompactionResult::default(),
             // Iceberg persistence result.
             iceberg_persisted_records: IcebergPersistedRecords::default(),
+            min_ongoing_flush_lsn: u64::MAX,
         }
     }
 
@@ -290,7 +298,7 @@ impl SnapshotTask {
 
     pub fn should_create_snapshot(&self) -> bool {
         // If mooncake has new transaction commits.
-        self.commit_lsn_baseline > 0
+        (self.commit_lsn_baseline > 0 && self.commit_lsn_baseline != self.prev_commit_lsn_baseline)
             || self.force_empty_iceberg_payload
         // If mooncake table accumulated large enough writes.
             || !self.new_disk_slices.is_empty()
@@ -739,6 +747,12 @@ impl MooncakeTable {
     }
 
     pub fn commit(&mut self, lsn: u64) {
+        assert!(
+            lsn >= self.next_snapshot_task.commit_lsn_baseline,
+            "Commit LSN {} is less than the current commit LSN baseline {}",
+            lsn,
+            self.next_snapshot_task.commit_lsn_baseline
+        );
         self.next_snapshot_task.commit_lsn_baseline = lsn;
         self.next_snapshot_task.new_commit_point = Some(self.mem_slice.get_commit_check_point());
         assert!(
@@ -813,7 +827,7 @@ impl MooncakeTable {
         xact_id: Option<u32>,
     ) {
         if let Some(lsn) = disk_slice.lsn() {
-            self.insert_pending_flush_lsn(lsn);
+            self.insert_ongoing_flush_lsn(lsn);
         } else {
             assert!(
                 xact_id.is_some(),
@@ -853,8 +867,8 @@ impl MooncakeTable {
         let lsn = disk_slice
             .lsn()
             .expect("LSN should never be none for non streaming flush");
-        self.remove_pending_flush_lsn(lsn);
-        self.set_next_flush_lsn(lsn);
+        self.remove_ongoing_flush_lsn(lsn);
+        self.try_set_next_flush_lsn(lsn);
         self.next_snapshot_task.new_disk_slices.push(disk_slice);
     }
 
@@ -874,7 +888,7 @@ impl MooncakeTable {
         let table_notify_tx = self.table_notify.as_ref().unwrap().clone();
 
         if self.mem_slice.is_empty() || self.ongoing_flush_lsns.contains(&lsn) {
-            self.set_next_flush_lsn(lsn);
+            self.try_set_next_flush_lsn(lsn);
             tokio::task::spawn(async move {
                 table_notify_tx
                     .send(TableEvent::FlushResult {
@@ -894,16 +908,16 @@ impl MooncakeTable {
         Ok(())
     }
 
-    // Sets the flush LSN for the next iceberg snapshot. Note that we can only set the flush LSN if it's greater than the current min pending flush LSN. Otherwise, LSNs will be persisted to iceberg in the wrong order.
-    fn set_next_flush_lsn(&mut self, lsn: u64) {
-        let min_pending_lsn = self.get_min_pending_flush_lsn();
+    // Attempts to set the flush LSN for the next iceberg snapshot. Note that we can only set the flush LSN if it's less than the current min pending flush LSN. Otherwise, LSNs will be persisted to iceberg in the wrong order.
+    fn try_set_next_flush_lsn(&mut self, lsn: u64) {
+        let min_pending_lsn = self.get_min_ongoing_flush_lsn();
         if lsn < min_pending_lsn {
             self.next_snapshot_task.new_flush_lsn = Some(lsn);
         }
     }
 
     // We fallback to u64::MAX if there are no pending flush LSNs so that the LSN is always greater than the flush LSN and the iceberg snapshot can proceed.
-    pub fn get_min_pending_flush_lsn(&self) -> u64 {
+    pub fn get_min_ongoing_flush_lsn(&self) -> u64 {
         self.ongoing_flush_lsns
             .iter()
             .next()
@@ -911,14 +925,14 @@ impl MooncakeTable {
             .unwrap_or(u64::MAX)
     }
 
-    pub fn insert_pending_flush_lsn(&mut self, lsn: u64) {
+    pub fn insert_ongoing_flush_lsn(&mut self, lsn: u64) {
         assert!(
             self.ongoing_flush_lsns.insert(lsn),
             "LSN {lsn} already in pending flush LSNs"
         );
     }
 
-    pub fn remove_pending_flush_lsn(&mut self, lsn: u64) {
+    pub fn remove_ongoing_flush_lsn(&mut self, lsn: u64) {
         assert!(
             self.ongoing_flush_lsns.remove(&lsn),
             "LSN {lsn} not found in pending flush LSNs"
@@ -936,7 +950,7 @@ impl MooncakeTable {
         self.mooncake_snapshot_ongoing = true;
 
         self.next_snapshot_task.new_rows = Some(self.mem_slice.get_latest_rows());
-        let next_snapshot_task = std::mem::take(&mut self.next_snapshot_task);
+        let mut next_snapshot_task = std::mem::take(&mut self.next_snapshot_task);
 
         // Re-initialize mooncake table fields.
         self.next_snapshot_task = SnapshotTask::new(self.metadata.config.clone());
@@ -944,17 +958,18 @@ impl MooncakeTable {
         // This is important if we have a pending flush that will be added to the next snapshot task.
         // Otherwise, if we simply reset the `commit_lsn_baseline` to zero, the ongoing flush will finish and set `flush_lsn`. Then we have a snapshot task where `commit_lsn` < `flush_lsn` which breaks our invariant.
         self.next_snapshot_task.commit_lsn_baseline = next_snapshot_task.commit_lsn_baseline;
+        self.next_snapshot_task.prev_commit_lsn_baseline = next_snapshot_task.commit_lsn_baseline;
 
         let cur_snapshot = self.snapshot.clone();
 
-        let min_pending_flush_lsn = self.get_min_pending_flush_lsn();
+        let min_ongoing_flush_lsn = self.get_min_ongoing_flush_lsn();
+        next_snapshot_task.min_ongoing_flush_lsn = min_ongoing_flush_lsn;
         // Create a detached task, whose completion will be notified separately.
         tokio::task::spawn(
             Self::create_snapshot_async(
                 cur_snapshot,
                 next_snapshot_task,
                 opt,
-                min_pending_flush_lsn,
                 self.table_notify.as_ref().unwrap().clone(),
             )
             .instrument(info_span!("create_snapshot_async")),
@@ -1216,14 +1231,13 @@ impl MooncakeTable {
         snapshot: Arc<RwLock<SnapshotTableState>>,
         next_snapshot_task: SnapshotTask,
         mut opt: SnapshotOption,
-        min_pending_flush_lsn: u64,
         table_notify: Sender<TableEvent>,
     ) {
         let uuid = std::mem::take(&mut opt.uuid);
         let snapshot_result = snapshot
             .write()
             .await
-            .update_snapshot(next_snapshot_task, opt, min_pending_flush_lsn)
+            .update_snapshot(next_snapshot_task, opt)
             .await;
         table_notify
             .send(TableEvent::MooncakeTableSnapshotResult {

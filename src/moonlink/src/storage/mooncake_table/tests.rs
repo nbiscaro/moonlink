@@ -1224,15 +1224,15 @@ async fn test_streaming_begin_flush_abort_end_flush_multiple() {
 /// ===================================
 
 #[tokio::test]
-async fn test_pending_flush_lsns_tracking() -> Result<()> {
-    let context = TestContext::new("pending_flush_tracking");
+async fn test_ongoing_flush_lsns_tracking() -> Result<()> {
+    let context = TestContext::new("ongoing_flush_tracking");
     let mut table = test_table(&context, "lsn_table", IdentityProp::FullRow).await;
     let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
     table.register_table_notify(event_completion_tx).await;
 
     // Verify initially no pending flushes
     assert!(table.ongoing_flush_lsns.is_empty());
-    assert_eq!(table.get_min_pending_flush_lsn(), u64::MAX);
+    assert_eq!(table.get_min_ongoing_flush_lsn(), u64::MAX);
 
     // Add data and start multiple flushes with monotonically increasing LSNs
     append_rows(&mut table, vec![test_row(1, "A", 20)])?;
@@ -1260,25 +1260,25 @@ async fn test_pending_flush_lsns_tracking() -> Result<()> {
     assert_eq!(table.ongoing_flush_lsns.len(), 3);
 
     // Verify min is correctly calculated (should be 5)
-    assert_eq!(table.get_min_pending_flush_lsn(), 5);
+    assert_eq!(table.get_min_ongoing_flush_lsn(), 5);
 
     // Complete flush with LSN 10 (out of order completion)
     table.apply_flush_result(disk_slice_2);
     assert!(table.ongoing_flush_lsns.contains(&5));
     assert!(!table.ongoing_flush_lsns.contains(&10));
     assert!(table.ongoing_flush_lsns.contains(&15));
-    assert_eq!(table.get_min_pending_flush_lsn(), 5); // Still 5
+    assert_eq!(table.get_min_ongoing_flush_lsn(), 5); // Still 5
 
     // Complete flush with LSN 5
     table.apply_flush_result(disk_slice_1);
     assert!(!table.ongoing_flush_lsns.contains(&5));
     assert!(table.ongoing_flush_lsns.contains(&15));
-    assert_eq!(table.get_min_pending_flush_lsn(), 15); // Now 15
+    assert_eq!(table.get_min_ongoing_flush_lsn(), 15); // Now 15
 
     // Complete last flush
     table.apply_flush_result(disk_slice_3);
     assert!(table.ongoing_flush_lsns.is_empty());
-    assert_eq!(table.get_min_pending_flush_lsn(), u64::MAX);
+    assert_eq!(table.get_min_ongoing_flush_lsn(), u64::MAX);
 
     Ok(())
 }
@@ -1311,7 +1311,7 @@ async fn test_streaming_flush_lsns_tracking() -> Result<()> {
     // Verify both streaming LSNs are tracked
     assert!(table.ongoing_flush_lsns.contains(&100));
     assert!(table.ongoing_flush_lsns.contains(&50));
-    assert_eq!(table.get_min_pending_flush_lsn(), 50);
+    assert_eq!(table.get_min_ongoing_flush_lsn(), 50);
 
     // Mix with regular flush (must be higher than previous regular flush)
     append_rows(&mut table, vec![test_row(3, "C", 22)])?;
@@ -1324,7 +1324,7 @@ async fn test_streaming_flush_lsns_tracking() -> Result<()> {
     assert!(table.ongoing_flush_lsns.contains(&100));
     assert!(table.ongoing_flush_lsns.contains(&50));
     assert!(table.ongoing_flush_lsns.contains(&75));
-    assert_eq!(table.get_min_pending_flush_lsn(), 50);
+    assert_eq!(table.get_min_ongoing_flush_lsn(), 50);
 
     // Complete streaming flushes
     table.apply_stream_flush_result(xact_id_1, disk_slice_1);
@@ -1333,7 +1333,7 @@ async fn test_streaming_flush_lsns_tracking() -> Result<()> {
 
     // Verify all pending flushes are cleared
     assert!(table.ongoing_flush_lsns.is_empty());
-    assert_eq!(table.get_min_pending_flush_lsn(), u64::MAX);
+    assert_eq!(table.get_min_ongoing_flush_lsn(), u64::MAX);
 
     Ok(())
 }
@@ -1347,7 +1347,7 @@ async fn test_lsn_ordering_constraint_with_real_table_handler_state() -> Result<
 
     // Test case 1: No pending flushes - should allow any flush LSN
     assert!(table.ongoing_flush_lsns.is_empty());
-    let min_pending = table.get_min_pending_flush_lsn();
+    let min_pending = table.get_min_ongoing_flush_lsn();
     assert_eq!(min_pending, u64::MAX);
 
     // With no pending flushes, should allow iceberg snapshots
@@ -1377,7 +1377,7 @@ async fn test_lsn_ordering_constraint_with_real_table_handler_state() -> Result<
         .await
         .expect("Disk slice should be present");
 
-    let min_pending = table.get_min_pending_flush_lsn();
+    let min_pending = table.get_min_ongoing_flush_lsn();
     assert_eq!(min_pending, 30);
 
     // Should allow iceberg snapshots with flush_lsn < 30
@@ -1446,7 +1446,7 @@ async fn test_lsn_ordering_constraint_with_real_table_handler_state() -> Result<
 
     // Complete the flush with LSN 30
     table.apply_flush_result(disk_slice_1);
-    let min_pending = table.get_min_pending_flush_lsn();
+    let min_pending = table.get_min_ongoing_flush_lsn();
     assert_eq!(min_pending, 50);
 
     // Now should allow iceberg snapshots with flush_lsn < 50
@@ -1479,7 +1479,7 @@ async fn test_lsn_ordering_constraint_with_real_table_handler_state() -> Result<
 
     // Complete the remaining flush
     table.apply_flush_result(disk_slice_2);
-    let min_pending = table.get_min_pending_flush_lsn();
+    let min_pending = table.get_min_ongoing_flush_lsn();
     assert_eq!(min_pending, u64::MAX);
 
     // Now should allow any iceberg snapshot again
@@ -1529,25 +1529,25 @@ async fn test_out_of_order_flush_completion() -> Result<()> {
     assert!(table.ongoing_flush_lsns.contains(&10));
     assert!(table.ongoing_flush_lsns.contains(&20));
     assert!(table.ongoing_flush_lsns.contains(&30));
-    assert_eq!(table.get_min_pending_flush_lsn(), 10);
+    assert_eq!(table.get_min_ongoing_flush_lsn(), 10);
 
     // Complete flush 30 first (out of order)
     table.apply_flush_result(disk_slice_30);
     assert!(!table.ongoing_flush_lsns.contains(&30));
     assert!(table.ongoing_flush_lsns.contains(&10));
     assert!(table.ongoing_flush_lsns.contains(&20));
-    assert_eq!(table.get_min_pending_flush_lsn(), 10); // Still 10
+    assert_eq!(table.get_min_ongoing_flush_lsn(), 10); // Still 10
 
     // Complete flush 10 (should update min to 20)
     table.apply_flush_result(disk_slice_10);
     assert!(!table.ongoing_flush_lsns.contains(&10));
     assert!(table.ongoing_flush_lsns.contains(&20));
-    assert_eq!(table.get_min_pending_flush_lsn(), 20);
+    assert_eq!(table.get_min_ongoing_flush_lsn(), 20);
 
     // Complete flush 20 (should clear all)
     table.apply_flush_result(disk_slice_20);
     assert!(table.ongoing_flush_lsns.is_empty());
-    assert_eq!(table.get_min_pending_flush_lsn(), u64::MAX);
+    assert_eq!(table.get_min_ongoing_flush_lsn(), u64::MAX);
 
     Ok(())
 }
@@ -1579,10 +1579,10 @@ async fn test_mixed_regular_and_streaming_lsn_ordering() -> Result<()> {
     // Verify both are tracked and min is 50
     assert!(table.ongoing_flush_lsns.contains(&100));
     assert!(table.ongoing_flush_lsns.contains(&50));
-    assert_eq!(table.get_min_pending_flush_lsn(), 50);
+    assert_eq!(table.get_min_ongoing_flush_lsn(), 50);
 
     // According to table handler logic, iceberg snapshots with flush_lsn >= 50 should be blocked
-    let min_pending = table.get_min_pending_flush_lsn();
+    let min_pending = table.get_min_ongoing_flush_lsn();
     assert!(!TableHandlerState::can_initiate_iceberg_snapshot(
         50,
         min_pending,
@@ -1606,10 +1606,10 @@ async fn test_mixed_regular_and_streaming_lsn_ordering() -> Result<()> {
     table.apply_stream_flush_result(xact_id, streaming_disk_slice);
     assert!(!table.ongoing_flush_lsns.contains(&50));
     assert!(table.ongoing_flush_lsns.contains(&100));
-    assert_eq!(table.get_min_pending_flush_lsn(), 100);
+    assert_eq!(table.get_min_ongoing_flush_lsn(), 100);
 
     // Now iceberg snapshots with flush_lsn < 100 should be allowed
-    let min_pending = table.get_min_pending_flush_lsn();
+    let min_pending = table.get_min_ongoing_flush_lsn();
     assert!(TableHandlerState::can_initiate_iceberg_snapshot(
         75,
         min_pending,
@@ -1626,7 +1626,7 @@ async fn test_mixed_regular_and_streaming_lsn_ordering() -> Result<()> {
     // Complete regular flush
     table.apply_flush_result(regular_disk_slice);
     assert!(table.ongoing_flush_lsns.is_empty());
-    assert_eq!(table.get_min_pending_flush_lsn(), u64::MAX);
+    assert_eq!(table.get_min_ongoing_flush_lsn(), u64::MAX);
 
     Ok(())
 }
@@ -1640,7 +1640,7 @@ async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
 
     // Test case 1: No pending flushes - both functions should allow operations
     assert!(table.ongoing_flush_lsns.is_empty());
-    let min_pending = table.get_min_pending_flush_lsn();
+    let min_pending = table.get_min_ongoing_flush_lsn();
     assert_eq!(min_pending, u64::MAX);
 
     // With no pending flushes, should allow iceberg snapshots for any flush_lsn
@@ -1686,12 +1686,12 @@ async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
         .await
         .expect("Disk slice should be present");
 
-    let min_pending = table.get_min_pending_flush_lsn();
+    let min_pending = table.get_min_ongoing_flush_lsn();
     assert_eq!(min_pending, 30);
 
     // Test complementary LSN ordering logic:
-    // can_initiate_iceberg_snapshot requires: flush_lsn < min_pending_flush_lsn
-    // should_force_snapshot_by_commit_lsn requires: min_pending_flush_lsn >= commit_lsn (returns false if min_pending_flush_lsn < commit_lsn)
+    // can_initiate_iceberg_snapshot requires: flush_lsn < min_ongoing_flush_lsn
+    // should_force_snapshot_by_commit_lsn requires: min_ongoing_flush_lsn >= commit_lsn (returns false if min_ongoing_flush_lsn < commit_lsn)
 
     // For LSNs < 30 (min pending):
     // - can_initiate_iceberg_snapshot should return true (flush_lsn < min_pending)
@@ -1755,7 +1755,7 @@ async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
 
     // Test case 3: Complete first flush and test again
     table.apply_flush_result(disk_slice_1);
-    let min_pending = table.get_min_pending_flush_lsn();
+    let min_pending = table.get_min_ongoing_flush_lsn();
     assert_eq!(min_pending, 50);
 
     // Now with min_pending = 50:
@@ -1859,7 +1859,7 @@ async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
 
     // Complete the remaining flush
     table.apply_flush_result(disk_slice_2);
-    let min_pending = table.get_min_pending_flush_lsn();
+    let min_pending = table.get_min_ongoing_flush_lsn();
     assert_eq!(min_pending, u64::MAX);
 
     // Now with no pending flushes, both functions should work without LSN constraints
@@ -1909,7 +1909,7 @@ async fn test_lsn_ordering_both_functions_in_tandem() -> Result<()> {
 /// ===================================
 
 #[tokio::test]
-async fn test_iceberg_snapshot_blocked_by_pending_flushes() -> Result<()> {
+async fn test_iceberg_snapshot_blocked_by_ongoing_flushes() -> Result<()> {
     let context = TestContext::new("iceberg_snapshot_blocked");
     let mut table = test_table(&context, "blocked_table", IdentityProp::FullRow).await;
     let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
@@ -1928,7 +1928,7 @@ async fn test_iceberg_snapshot_blocked_by_pending_flushes() -> Result<()> {
 
     // Verify we have pending flushes
     assert!(table.ongoing_flush_lsns.contains(&30));
-    assert_eq!(table.get_min_pending_flush_lsn(), 30);
+    assert_eq!(table.get_min_ongoing_flush_lsn(), 30);
 
     // Create a mooncake snapshot - this will create an iceberg payload
     let created = table.create_snapshot(SnapshotOption {
@@ -1948,7 +1948,7 @@ async fn test_iceberg_snapshot_blocked_by_pending_flushes() -> Result<()> {
 
     // Test the table handler constraint logic
     if let Some(payload) = iceberg_snapshot_payload {
-        let min_pending = table.get_min_pending_flush_lsn();
+        let min_pending = table.get_min_ongoing_flush_lsn();
 
         // The table handler should block this iceberg snapshot due to pending flushes
         let can_initiate = TableHandlerState::can_initiate_iceberg_snapshot(
@@ -1982,7 +1982,7 @@ async fn test_iceberg_snapshot_blocked_by_pending_flushes() -> Result<()> {
 
     // Now table handler should allow iceberg snapshot
     if let Some(payload) = iceberg_snapshot_payload {
-        let min_pending = table.get_min_pending_flush_lsn();
+        let min_pending = table.get_min_ongoing_flush_lsn();
         let can_initiate = TableHandlerState::can_initiate_iceberg_snapshot(
             payload.flush_lsn,
             min_pending,
@@ -2026,12 +2026,12 @@ async fn test_out_of_order_flush_completion_with_iceberg_snapshots() -> Result<(
         .expect("Disk slice 3 should be present");
 
     // Verify all pending flushes and min pending LSN
-    assert_eq!(table.get_min_pending_flush_lsn(), 10);
+    assert_eq!(table.get_min_ongoing_flush_lsn(), 10);
     assert!(table.ongoing_flush_lsns.contains(&10));
     assert!(table.ongoing_flush_lsns.contains(&20));
     assert!(table.ongoing_flush_lsns.contains(&30));
 
-    // Create snapshot and test constraint with min_pending_flush_lsn = 10
+    // Create snapshot and test constraint with min_ongoing_flush_lsn = 10
     let created = table.create_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
@@ -2048,7 +2048,7 @@ async fn test_out_of_order_flush_completion_with_iceberg_snapshots() -> Result<(
     if let Some(payload) = iceberg_snapshot_payload {
         let can_initiate = TableHandlerState::can_initiate_iceberg_snapshot(
             payload.flush_lsn,
-            10, // min_pending_flush_lsn
+            10, // min_ongoing_flush_lsn
             true,
             false,
         );
@@ -2057,13 +2057,13 @@ async fn test_out_of_order_flush_completion_with_iceberg_snapshots() -> Result<(
         if payload.flush_lsn >= 10 {
             assert!(
                 !can_initiate,
-                "Should block iceberg snapshot when flush_lsn {} >= min_pending_flush_lsn 10",
+                "Should block iceberg snapshot when flush_lsn {} >= min_ongoing_flush_lsn 10",
                 payload.flush_lsn
             );
         } else {
             assert!(
                 can_initiate,
-                "Should allow iceberg snapshot when flush_lsn {} < min_pending_flush_lsn 10",
+                "Should allow iceberg snapshot when flush_lsn {} < min_ongoing_flush_lsn 10",
                 payload.flush_lsn
             );
         }
@@ -2071,43 +2071,43 @@ async fn test_out_of_order_flush_completion_with_iceberg_snapshots() -> Result<(
 
     // Complete flushes OUT OF ORDER - complete middle one first (LSN 20)
     table.apply_flush_result(disk_slice_2);
-    assert_eq!(table.get_min_pending_flush_lsn(), 10); // Should still be 10
+    assert_eq!(table.get_min_ongoing_flush_lsn(), 10); // Should still be 10
     assert!(table.ongoing_flush_lsns.contains(&10));
     assert!(!table.ongoing_flush_lsns.contains(&20));
     assert!(table.ongoing_flush_lsns.contains(&30));
 
     // Complete the first flush (LSN 10) - now min should be 30
     table.apply_flush_result(disk_slice_1);
-    assert_eq!(table.get_min_pending_flush_lsn(), 30); // Now should be 30
+    assert_eq!(table.get_min_ongoing_flush_lsn(), 30); // Now should be 30
     assert!(!table.ongoing_flush_lsns.contains(&10));
     assert!(!table.ongoing_flush_lsns.contains(&20));
     assert!(table.ongoing_flush_lsns.contains(&30));
 
     // Test constraint logic with new min pending flush LSN = 30
     let can_initiate_low = TableHandlerState::can_initiate_iceberg_snapshot(
-        25, // flush_lsn < min_pending_flush_lsn
-        30, // min_pending_flush_lsn
+        25, // flush_lsn < min_ongoing_flush_lsn
+        30, // min_ongoing_flush_lsn
         true, false,
     );
     assert!(
         can_initiate_low,
-        "Should allow iceberg snapshot when flush_lsn < min_pending_flush_lsn"
+        "Should allow iceberg snapshot when flush_lsn < min_ongoing_flush_lsn"
     );
 
     let can_initiate_high = TableHandlerState::can_initiate_iceberg_snapshot(
-        35, // flush_lsn > min_pending_flush_lsn
-        30, // min_pending_flush_lsn
+        35, // flush_lsn > min_ongoing_flush_lsn
+        30, // min_ongoing_flush_lsn
         true, false,
     );
     assert!(
         !can_initiate_high,
-        "Should block iceberg snapshot when flush_lsn >= min_pending_flush_lsn"
+        "Should block iceberg snapshot when flush_lsn >= min_ongoing_flush_lsn"
     );
 
     // Complete the last flush
     table.apply_flush_result(disk_slice_3);
     assert!(table.ongoing_flush_lsns.is_empty());
-    assert_eq!(table.get_min_pending_flush_lsn(), u64::MAX);
+    assert_eq!(table.get_min_ongoing_flush_lsn(), u64::MAX);
 
     // Now any flush LSN should be allowed
     let can_initiate_any = TableHandlerState::can_initiate_iceberg_snapshot(
@@ -2200,7 +2200,7 @@ async fn test_streaming_batch_id_mismatch_with_data_compaction() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_streaming_empty_batch_filtering_bug() -> Result<()> {
+async fn test_streaming_empty_batch_filtering() -> Result<()> {
     let context = TestContext::new("streaming_empty_batch_filtering");
     let mut table = test_table(
         &context,
@@ -2247,7 +2247,7 @@ async fn test_streaming_empty_batch_filtering_bug() -> Result<()> {
 
     // Add more data to trigger compaction threshold
     append_rows(&mut table, vec![test_row(5, "More", 24)])?;
-    table.commit(3);
+    table.commit(16);
     flush_table_and_sync(&mut table, &mut event_completion_rx, 20).await?;
 
     // Create snapshot with data compaction
@@ -2398,11 +2398,11 @@ async fn test_puffin_deletion_blob_inconsistency_assertion() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_stream_commit_with_pending_flush_deletion_remapping_bug() -> Result<()> {
-    let context = TestContext::new("stream_commit_pending_flush_deletion_bug");
+async fn test_stream_commit_with_ongoing_flush_deletion_remapping() -> Result<()> {
+    let context = TestContext::new("stream_commit_ongoing_flush_deletion");
     let mut table = test_table(
         &context,
-        "stream_commit_pending_flush_deletion_bug",
+        "stream_commit_ongoing_flush_deletion",
         IdentityProp::Keys(vec![0]),
     )
     .await;
@@ -2459,11 +2459,11 @@ async fn test_stream_commit_with_pending_flush_deletion_remapping_bug() -> Resul
 }
 
 #[tokio::test]
-async fn test_chaos_sequence_exact_repro_with_async_flush() -> Result<()> {
-    let context = TestContext::new("chaos_sequence_exact_repro_async_flush");
+async fn test_deletion_align_with_batch() -> Result<()> {
+    let context = TestContext::new("deletion_align_with_batch");
     let mut table = test_table(
         &context,
-        "chaos_sequence_exact_repro_async_flush",
+        "deletion_align_with_batch",
         IdentityProp::Keys(vec![0]),
     )
     .await;
@@ -2500,9 +2500,103 @@ async fn test_chaos_sequence_exact_repro_with_async_flush() -> Result<()> {
     });
     assert!(created, "Mooncake snapshot should be created");
 
-    // This should fail with the same assertion as the chaos test:
-    // "assertion failed: res" at snapshot.rs:893:21
     sync_mooncake_snapshot(&mut table, &mut event_completion_rx).await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_disk_slice_write_failure() -> Result<()> {
+    // Create a test context with an invalid directory to force write failure
+    let temp_dir = TempDir::new().unwrap();
+    let invalid_path = temp_dir.path().join("non_existent_directory");
+
+    // Create table metadata with invalid path that will cause flush failure
+    let table_metadata = Arc::new(TableMetadata {
+        name: "test_table".to_string(),
+        table_id: 1,
+        schema: create_test_arrow_schema(),
+        config: MooncakeTableConfig::default(),
+        path: invalid_path, // This directory doesn't exist, causing write failures
+        identity: IdentityProp::Keys(vec![0]),
+    });
+
+    let table_metadata_copy = table_metadata.clone();
+    let mut mock_table_manager = MockTableManager::new();
+    mock_table_manager
+        .expect_get_warehouse_location()
+        .times(1)
+        .returning(|| "".to_string());
+    mock_table_manager
+        .expect_load_snapshot_from_table()
+        .times(1)
+        .returning(move || {
+            let table_metadata_copy = table_metadata_copy.clone();
+            Box::pin(async move {
+                Ok((
+                    /*next_file_id=*/ 0,
+                    MooncakeSnapshot::new(table_metadata_copy),
+                ))
+            })
+        });
+
+    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, temp_dir.path());
+    let wal_manager = WalManager::new(&wal_config);
+
+    let mut table = MooncakeTable::new_with_table_manager(
+        table_metadata,
+        Box::new(mock_table_manager),
+        ObjectStorageCache::default_for_test(&temp_dir),
+        FileSystemAccessor::default_for_test(&temp_dir),
+        wal_manager,
+    )
+    .await
+    .unwrap();
+
+    let (event_completion_tx, mut event_completion_rx) = mpsc::channel(100);
+    table.register_table_notify(event_completion_tx).await;
+
+    // Add some data to trigger a flush
+    let row = test_row(1, "Alice", 20);
+    table.append(row).unwrap();
+    table.commit(100);
+
+    // Attempt to flush - this should fail due to invalid directory
+    table.flush(100).unwrap();
+
+    // Wait for the flush result and verify it contains the expected error
+    let flush_result = event_completion_rx.recv().await.unwrap();
+    match flush_result {
+        TableEvent::FlushResult {
+            xact_id: None,
+            flush_result,
+        } => {
+            match flush_result {
+                Some(Err(e)) => {
+                    // Verify the error contains information about the failed write
+                    let error_msg = format!("{e:?}");
+                    println!("error_msg: {error_msg}");
+                    assert!(
+                        error_msg.contains("No such file or directory")
+                            || error_msg.contains("system cannot find the path"),
+                        "Expected error about missing directory, got: {error_msg}"
+                    );
+
+                    // This error would cause the table handler to panic with "Fatal flush error"
+                    // when it processes the FlushResult event in the table handler event loop
+                }
+                Some(Ok(_)) => {
+                    panic!("Expected flush to fail, but it succeeded");
+                }
+                None => {
+                    panic!("Expected flush error, but got None");
+                }
+            }
+        }
+        _ => {
+            panic!("Expected FlushResult as first event, but got: {flush_result:?}");
+        }
+    }
 
     Ok(())
 }

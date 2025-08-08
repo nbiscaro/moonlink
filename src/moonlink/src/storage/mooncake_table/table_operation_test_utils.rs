@@ -54,7 +54,7 @@ pub(crate) async fn flush_table_and_sync(
 }
 
 /// Flush mooncake, block wait its completion but do NOT apply the result.
-/// This leaves the LSN in pending_flush_lsns until apply_flush_result is called.
+/// This leaves the LSN in ongoing_flush_lsns until apply_flush_result is called.
 #[cfg(test)]
 pub(crate) async fn flush_table_and_sync_no_apply(
     table: &mut MooncakeTable,
@@ -84,7 +84,7 @@ pub(crate) async fn flush_table_and_sync_no_apply(
     }
 }
 
-/// Flush mooncake, block wait its completion and reflect result to mooncake table.
+/// Flush mooncake, block wait its completion.
 #[cfg(test)]
 pub(crate) async fn flush_stream_and_sync_no_apply(
     table: &mut MooncakeTable,

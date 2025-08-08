@@ -376,7 +376,7 @@ impl TableHandler {
                             table.notify_snapshot_reader(lsn);
 
                             // Process iceberg snapshot and trigger iceberg snapshot if necessary.
-                            let min_pending_flush_lsn = table.get_min_pending_flush_lsn();
+                            let min_pending_flush_lsn = table.get_min_ongoing_flush_lsn();
                             if TableHandlerState::can_initiate_iceberg_snapshot(lsn, min_pending_flush_lsn, table_handler_state.iceberg_snapshot_result_consumed, table_handler_state.iceberg_snapshot_ongoing) {
                                 if let Some(iceberg_snapshot_payload) = iceberg_snapshot_payload {
                                     table_handler_event_sender.send(TableEvent::RegularIcebergSnapshot {
@@ -538,6 +538,7 @@ impl TableHandler {
                                 }
                                 Some(Err(e)) => {
                                     error!(error = ?e, "failed to flush disk slice");
+                                    panic!("Fatal flush error: {e:?}");
                                 }
                                 None => {
                                     error!("flush result is none");
@@ -699,7 +700,7 @@ impl TableHandler {
         // and 3. there's no snapshot creation operation ongoing
         // and 4. there's no pending flush LSNs < lsn
 
-        let min_pending_flush_lsn = table.get_min_pending_flush_lsn();
+        let min_pending_flush_lsn = table.get_min_ongoing_flush_lsn();
         let should_force_snapshot = TableHandlerState::should_force_snapshot_by_commit_lsn(
             lsn,
             min_pending_flush_lsn,

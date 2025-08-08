@@ -355,7 +355,6 @@ async fn test_force_data_compaction_with_failed_iceberg_persistence() {
     )
     .await;
     env.commit(/*lsn=*/ 20).await;
-    // env.flush_table(/*lsn=*/ 30).await;
     env.flush_table_and_sync(/*lsn=*/ 30, None).await;
 
     // Append another row, commit, and flush.

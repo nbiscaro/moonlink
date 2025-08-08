@@ -26,7 +26,7 @@ pub(super) struct TransactionStreamState {
     status: TransactionStreamStatus,
     /// Number of pending flushes for this transaction.
     /// Only safe to remove transaction stream state when there are no pending flushes.
-    pending_flush_count: u32,
+    ongoing_flush_count: u32,
     /// Commit LSN for this transaction, set when transaction is committed.
     commit_lsn: Option<u64>,
 }
@@ -106,7 +106,7 @@ impl TransactionStreamState {
             flushed_files: hashbrown::HashMap::new(),
             new_record_batches: hashbrown::HashMap::new(),
             status: TransactionStreamStatus::Pending,
-            pending_flush_count: 0,
+            ongoing_flush_count: 0,
             commit_lsn: None,
         }
     }
@@ -288,7 +288,7 @@ impl MooncakeTable {
 
         // If there are no pending flushes, we can remove the stream state immediately
         // Otherwise, let `apply_stream_flush_result` handle the abortion
-        if stream_state.pending_flush_count == 0 {
+        if stream_state.ongoing_flush_count == 0 {
             self.transaction_stream_states.remove(&xact_id);
         }
 
@@ -348,8 +348,8 @@ impl MooncakeTable {
     /// Removes in memory indices and record batches from the stream state.
     pub fn apply_stream_flush_result(&mut self, xact_id: u32, mut disk_slice: DiskSliceWriter) {
         if let Some(lsn) = disk_slice.lsn() {
-            self.remove_pending_flush_lsn(lsn);
-            self.set_next_flush_lsn(lsn);
+            self.remove_ongoing_flush_lsn(lsn);
+            self.try_set_next_flush_lsn(lsn);
         }
 
         let stream_state = self
@@ -357,7 +357,7 @@ impl MooncakeTable {
             .get_mut(&xact_id)
             .expect("Stream state not found for xact_id: {xact_id}");
 
-        stream_state.pending_flush_count -= 1;
+        stream_state.ongoing_flush_count -= 1;
 
         // Transaction committed while stream was flushing. Add disk slice to snapshot task and let snapshot handle it.
         // Drop the stream state since the transaction is over.
@@ -373,7 +373,7 @@ impl MooncakeTable {
             }
 
             self.next_snapshot_task.new_disk_slices.push(disk_slice);
-            if stream_state.pending_flush_count == 0 {
+            if stream_state.ongoing_flush_count == 0 {
                 self.transaction_stream_states.remove(&xact_id);
             }
             return;
@@ -382,7 +382,7 @@ impl MooncakeTable {
         // Transaction aborted while stream was flushing. Remove stream state and do nothing.
         // Drop the stream state since the transaction is over.
         if stream_state.status == TransactionStreamStatus::Aborted {
-            if stream_state.pending_flush_count == 0 {
+            if stream_state.ongoing_flush_count == 0 {
                 self.transaction_stream_states.remove(&xact_id);
             }
             return;
@@ -428,13 +428,13 @@ impl MooncakeTable {
         let mut stream_state = self
             .transaction_stream_states
             .remove(&xact_id)
-            .expect("Stream state not found for xact_id: {xact_id}");
+            .expect("Stream state not found for xact_id, lsn: {xact_id, lsn}");
 
         let mut disk_slice = self.prepare_stream_disk_slice(&mut stream_state, lsn)?;
 
         let table_notify_tx = self.table_notify.as_ref().unwrap().clone();
 
-        stream_state.pending_flush_count += 1;
+        stream_state.ongoing_flush_count += 1;
 
         self.flush_disk_slice(&mut disk_slice, table_notify_tx, Some(xact_id));
 
@@ -483,6 +483,7 @@ impl MooncakeTable {
                 .iter()
                 .map(|ptr| ptr.arc_ptr()),
         );
+        assert!(lsn >= self.next_snapshot_task.commit_lsn_baseline);
         self.next_snapshot_task.commit_lsn_baseline = lsn;
 
         // We update our delete records with the last lsn of the transaction

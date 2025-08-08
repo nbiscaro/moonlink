@@ -2,6 +2,8 @@ use more_asserts as ma;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+pub const STREAMING_BATCH_ID_MAX: u64 = 1u64 << 63;
+
 /// Batch ID counter for the two-counter allocation strategy.
 ///
 /// The system uses two separate atomic counters to partition the 64-bit batch ID space:
@@ -18,7 +20,11 @@ pub(super) struct BatchIdCounter {
 impl BatchIdCounter {
     pub fn new(is_streaming: bool) -> Self {
         Self {
-            counter: Arc::new(AtomicU64::new(if is_streaming { 0 } else { 1u64 << 63 })),
+            counter: Arc::new(AtomicU64::new(if is_streaming {
+                0
+            } else {
+                STREAMING_BATCH_ID_MAX
+            })),
             is_streaming,
         }
     }
@@ -36,7 +42,7 @@ impl BatchIdCounter {
         if self.is_streaming {
             ma::assert_lt!(
                 current,
-                (1u64 << 63),
+                STREAMING_BATCH_ID_MAX,
                 "Streaming batch ID counter overflow: exceeded 2^63-1"
             );
         } else {
@@ -62,7 +68,7 @@ mod tests {
     #[test]
     fn test_non_streaming_counter_creation() {
         let counter = BatchIdCounter::new(false);
-        assert_eq!(counter.load(), 1u64 << 63);
+        assert_eq!(counter.load(), STREAMING_BATCH_ID_MAX);
         assert!(!counter.is_streaming);
     }
 
@@ -82,7 +88,7 @@ mod tests {
     #[test]
     fn test_non_streaming_counter_next() {
         let counter = BatchIdCounter::new(false);
-        let expected_start = 1u64 << 63;
+        let expected_start = STREAMING_BATCH_ID_MAX;
 
         // First call should return 2^63, then increment to 2^63 + 1
         assert_eq!(counter.next(), expected_start);
@@ -99,7 +105,7 @@ mod tests {
         let counter = BatchIdCounter::new(true);
 
         // Manually set counter to the limit
-        let limit = 1u64 << 63;
+        let limit = STREAMING_BATCH_ID_MAX;
         counter.counter.store(limit, Ordering::Relaxed);
 
         // This should panic
@@ -121,7 +127,7 @@ mod tests {
     #[test]
     fn test_streaming_counter_near_limit() {
         let counter = BatchIdCounter::new(true);
-        let near_limit = (1u64 << 63) - 2;
+        let near_limit = STREAMING_BATCH_ID_MAX - 2;
 
         // Set counter near the limit
         counter.counter.store(near_limit, Ordering::Relaxed);
@@ -168,7 +174,10 @@ mod tests {
 
         // All IDs should be in streaming range
         for id in &all_ids {
-            assert!(*id < (1u64 << 63), "ID {id} should be in streaming range");
+            assert!(
+                *id < STREAMING_BATCH_ID_MAX,
+                "ID {id} should be in streaming range"
+            );
         }
 
         // IDs should be consecutive starting from 0

@@ -301,7 +301,7 @@ impl TableHandlerState {
     /// Return whether should force to create a mooncake and iceberg snapshot, based on the new coming commit LSN.
     pub(crate) fn should_force_snapshot_by_commit_lsn(
         commit_lsn: u64,
-        min_pending_flush_lsn: u64,
+        min_ongoing_flush_lsn: u64,
         table_maintenance_process_status: &MaintenanceProcessStatus,
         largest_force_snapshot_lsn: Option<u64>,
         mooncake_snapshot_ongoing: bool,
@@ -312,7 +312,7 @@ impl TableHandlerState {
         }
 
         // No force snapshot if pending flush LSNs < commit LSN.
-        if min_pending_flush_lsn < commit_lsn {
+        if min_ongoing_flush_lsn < commit_lsn {
             return false;
         }
 
@@ -440,13 +440,13 @@ impl TableHandlerState {
     ///
     pub(crate) fn can_initiate_iceberg_snapshot(
         flush_lsn: u64,
-        min_pending_flush_lsn: u64,
+        min_ongoing_flush_lsn: u64,
         iceberg_snapshot_result_consumed: bool,
         iceberg_snapshot_ongoing: bool,
     ) -> bool {
         iceberg_snapshot_result_consumed
             && !iceberg_snapshot_ongoing
-            && flush_lsn < min_pending_flush_lsn
+            && flush_lsn < min_ongoing_flush_lsn
     }
 
     pub(crate) fn reset_iceberg_state_at_mooncake_snapshot(&mut self) {

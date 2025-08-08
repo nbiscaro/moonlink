@@ -29,7 +29,9 @@ impl SnapshotTableState {
                 // Force snapshot could flush as long as the table at a clean state (aka, no uncommitted states), possible to go without commit at current snapshot iteration.
                 if opt.force_create {
                     assert!(
-                        task.commit_lsn_baseline == 0 || task.commit_lsn_baseline >= new_flush_lsn,
+                        task.commit_lsn_baseline == 0
+                            || task.commit_lsn_baseline >= new_flush_lsn
+                            || task.commit_lsn_baseline == task.prev_commit_lsn_baseline,
                         "New commit LSN is {}, new flush LSN is {}",
                         task.commit_lsn_baseline,
                         new_flush_lsn
