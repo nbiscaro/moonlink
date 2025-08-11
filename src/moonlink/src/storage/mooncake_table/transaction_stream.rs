@@ -21,7 +21,7 @@ pub(super) struct TransactionStreamState {
     index_bloom_filter: BloomFilter,
     /// Both in memory and on disk indices for this transaction.
     stream_indices: MooncakeIndex,
-    flushed_files: hashbrown::HashMap<MooncakeDataFileRef, DiskFileEntry>,
+    pub(crate) flushed_files: hashbrown::HashMap<MooncakeDataFileRef, DiskFileEntry>,
     new_record_batches: hashbrown::HashMap<u64, InMemoryBatch>,
     status: TransactionStreamStatus,
     /// Number of pending flushes for this transaction.
