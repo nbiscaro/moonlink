@@ -672,7 +672,7 @@ impl TableHandler {
                         panic!("Fatal flush error: {e:?}");
                     }
                     None => {
-                        error!("flush result is none");
+                        debug!("flush result is none");
                     }
                 },
                 // ==============================
