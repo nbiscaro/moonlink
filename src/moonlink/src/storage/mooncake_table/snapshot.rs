@@ -716,8 +716,8 @@ impl SnapshotTableState {
             // In the case a streaming transaction commits before flush, we assign disk_slice.writer_lsn = commit_lsn.
             // The corresponding deletions have lsn = commit_lsn - 1, so we need >= write_lsn - 1
             // to ensure these deletions get remapped from memory to disk locations.
-            // Use wrapping_sub(1) for the special initial copy case where write_lsn is 0. In this case we still want to remap the deletion log.
-            let threshold = write_lsn.wrapping_sub(1);
+            // Use saturating_sub(1) for the special initial copy case where write_lsn is 0. In this case we still want to remap the deletion log.
+            let threshold = write_lsn.saturating_sub(1);
             for deletion in self.committed_deletion_log.iter_mut() {
                 if deletion.lsn < threshold {
                     continue;
