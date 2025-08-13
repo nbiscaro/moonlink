@@ -28,6 +28,8 @@ use table_handler_state::{
     MaintenanceProcessStatus, MaintenanceRequestStatus, SpecialTableState, TableHandlerState,
 };
 
+const MAX_BUFFERED_TABLE_EVENTS: usize = 32_768;
+
 /// Handler for table operations
 pub struct TableHandler {
     /// Handle to periodical events.
@@ -51,7 +53,7 @@ impl TableHandler {
         table_event_replay_tx: Option<mpsc::UnboundedSender<MooncakeTableEvent>>,
     ) -> Self {
         // Create channel for events
-        let (event_sender, event_receiver) = mpsc::channel(100);
+        let (event_sender, event_receiver) = mpsc::channel(MAX_BUFFERED_TABLE_EVENTS);
 
         // Register channel for internal control events.
         table.register_table_notify(event_sender.clone()).await;
