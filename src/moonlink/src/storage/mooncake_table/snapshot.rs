@@ -711,17 +711,9 @@ impl SnapshotTableState {
                     .is_none());
             }
 
-            // Remap deletions written *after* this slice’s LSN
-            // We set to write_lsn - 1 to maintain consistency with deletion LSNs from the streaming case.
-            // In the case a streaming transaction commits before flush, we assign disk_slice.writer_lsn = commit_lsn.
-            // The corresponding deletions have lsn = commit_lsn - 1, so we need >= write_lsn - 1
-            // to ensure these deletions get remapped from memory to disk locations.
-            // Use saturating_sub(1) for the special initial copy case where write_lsn is 0. In this case we still want to remap the deletion log.
-            let threshold = write_lsn.saturating_sub(1);
+            // If a committed deletion still points to a MemoryBatch that is being flushed
+            // in this slice, remap it to the corresponding DiskFile location and apply it.
             for deletion in self.committed_deletion_log.iter_mut() {
-                if deletion.lsn < threshold {
-                    continue;
-                }
                 if let Some(RecordLocation::DiskFile(file_id, row_idx)) =
                     slice.remap_deletion_if_needed(deletion)
                 {
