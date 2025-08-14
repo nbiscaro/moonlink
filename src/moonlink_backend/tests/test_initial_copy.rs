@@ -42,18 +42,23 @@ mod tests {
         let (guard, _) = TestGuard::new(None, true).await;
         let backend = guard.backend();
 
-        // Register the table - this kicks off *initial copy* in the background
-        backend
-            .create_table(
-                SCHEMA.to_string(),
-                TABLE.to_string(),
-                format!("public.{table_name}"),
-                SRC_URI.to_string(),
-                guard.get_serialized_table_config(),
-                None, /* input_schema */
-            )
-            .await
-            .unwrap();
+        // Register the table and run the initial copy in a spawned task so we can
+        // insert additional rows while the copy is running.
+        let backend_clone = Arc::clone(&backend);
+        let table_config = guard.get_serialized_table_config();
+        let create_handle = tokio::spawn(async move {
+            backend_clone
+                .create_table(
+                    SCHEMA.to_string(),
+                    TABLE.to_string(),
+                    format!("public.{table_name}"),
+                    SRC_URI.to_string(),
+                    table_config,
+                    None, /* input_schema */
+                )
+                .await
+                .unwrap();
+        });
 
         // While copy is in-flight, send an additional row that must be *buffered*
         initial_client
@@ -62,6 +67,9 @@ mod tests {
             .unwrap();
 
         let lsn_after_insert = current_wal_lsn(&initial_client).await;
+
+        // Wait for the copy to complete before scanning
+        create_handle.await.unwrap();
 
         let ids = ids_from_state(
             &backend
@@ -188,7 +196,7 @@ mod tests {
         let (guard, _) = TestGuard::new(None, true).await;
         let backend = Arc::clone(guard.backend());
 
-        // Start create_table without awaiting so we can modify data during copy
+        // Start create_table in a separate task so we can modify data during copy
         let backend_clone = Arc::clone(&backend);
         let table_config = guard.get_serialized_table_config();
         let create_handle = tokio::spawn(async move {
@@ -216,7 +224,10 @@ mod tests {
             .unwrap();
 
         let lsn = current_wal_lsn(&initial_client).await;
+
+        // Wait for the copy to complete before scanning
         create_handle.await.unwrap();
+
         let ids = ids_from_state(
             &backend
                 .scan_table(SCHEMA.to_string(), TABLE.to_string(), Some(lsn))
@@ -376,23 +387,29 @@ mod tests {
         let backend = Arc::clone(guard.backend());
 
         let backend_clone = Arc::clone(&backend);
-        backend_clone
-            .create_table(
-                SCHEMA.to_string(),
-                TABLE.to_string(),
-                format!("public.{table_name}"),
-                SRC_URI.to_string(),
-                guard.get_serialized_table_config(),
-                None, /* input_schema */
-            )
-            .await
-            .unwrap();
+        let table_config = guard.get_serialized_table_config();
+        let create_handle = tokio::spawn(async move {
+            backend_clone
+                .create_table(
+                    SCHEMA.to_string(),
+                    TABLE.to_string(),
+                    format!("public.{table_name}"),
+                    SRC_URI.to_string(),
+                    table_config,
+                    None, /* input_schema */
+                )
+                .await
+                .unwrap();
+        });
 
         // Delete one of the rows while copy is executing
         new_client
             .simple_query(&format!("DELETE FROM {table_name} WHERE id = 1;"))
             .await
             .unwrap();
+
+        // Wait for the copy to complete before inserting a new row
+        create_handle.await.unwrap();
 
         // Add another row after copy finishes
         initial_client
@@ -453,17 +470,19 @@ mod tests {
         let backend = Arc::clone(guard.backend());
 
         let backend_clone = Arc::clone(&backend);
-        backend_clone
-            .create_table(
-                SCHEMA.to_string(),
-                TABLE.to_string(),
-                format!("public.{table_name}"),
-                SRC_URI.to_string(),
-                guard.get_serialized_table_config(),
-                None, /* input_schema */
-            )
-            .await
-            .unwrap();
+        let create_handle = tokio::spawn(async move {
+            backend_clone
+                .create_table(
+                    SCHEMA.to_string(),
+                    TABLE.to_string(),
+                    format!("public.{table_name}"),
+                    SRC_URI.to_string(),
+                    guard.get_serialized_table_config(),
+                    None, /* input_schema */
+                )
+                .await
+                .unwrap();
+        });
 
         // Delete one of the rows currently being copied
         new_client
@@ -474,6 +493,9 @@ mod tests {
             ))
             .await
             .unwrap();
+
+        // Wait for the copy to complete before scanning
+        create_handle.await.unwrap();
 
         let lsn = current_wal_lsn(&initial_client).await;
         let ids = ids_from_state_with_deletes(
@@ -534,17 +556,20 @@ mod tests {
         let backend = Arc::clone(guard.backend());
 
         let backend_clone = Arc::clone(&backend);
-        backend_clone
-            .create_table(
-                SCHEMA.to_string(),
-                TABLE.to_string(),
-                format!("public.{table_name}"),
-                SRC_URI.to_string(),
-                guard.get_serialized_table_config(),
-                None, /* input_schema */
-            )
-            .await
-            .unwrap();
+        let table_config = guard.get_serialized_table_config();
+        let create_handle = tokio::spawn(async move {
+            backend_clone
+                .create_table(
+                    SCHEMA.to_string(),
+                    TABLE.to_string(),
+                    format!("public.{table_name}"),
+                    SRC_URI.to_string(),
+                    table_config,
+                    None, /* input_schema */
+                )
+                .await
+                .unwrap();
+        });
 
         // ===== 1. Massive concurrent mutations while COPY is still running =====
         // (a) Insert 100 fresh rows that must be buffered then applied.
@@ -597,6 +622,9 @@ mod tests {
             .unwrap();
 
         // ===== 2. Final verification =====
+        // Wait for the copy to complete before scanning the table
+        create_handle.await.unwrap();
+
         let lsn = current_wal_lsn(&initial_client).await;
         let observed_ids = ids_from_state_with_deletes(
             &backend
