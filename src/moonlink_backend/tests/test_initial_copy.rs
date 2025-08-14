@@ -44,7 +44,7 @@ mod tests {
 
         // Register the table and run the initial copy in a spawned task so we can
         // insert additional rows while the copy is running.
-        let backend_clone = Arc::clone(&backend);
+        let backend_clone = Arc::clone(backend);
         let table_config = guard.get_serialized_table_config();
         let create_handle = tokio::spawn(async move {
             backend_clone
