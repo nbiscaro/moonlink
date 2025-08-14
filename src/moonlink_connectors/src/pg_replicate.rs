@@ -163,32 +163,30 @@ impl PostgresConnection {
                 .add_table_to_publication(&schema.table_name)
                 .await?;
 
-            let schema_clone = schema.clone();
-            tokio::spawn(async move {
-                let (stream, start_lsn) = copy_source
-                    .get_table_copy_stream(&schema_clone.table_name, &schema_clone.column_schemas)
-                    .await
-                    .expect("failed to get table copy stream");
-                let res = copy_table_stream_impl(schema_clone, stream, &event_sender).await;
+            let (stream, start_lsn) = copy_source
+                .get_table_copy_stream(&schema.table_name, &schema.column_schemas)
+                .await
+                .expect("failed to get table copy stream");
+            let res = copy_table_stream_impl(schema.clone(), stream, &event_sender).await;
 
-                if let Err(e) = res {
-                    error!(error = ?e, table_id = src_table_id, "failed to copy table");
-                }
-                // Commit the transaction
-                copy_source
-                    .commit_transaction()
-                    .await
-                    .expect("failed to commit transaction");
+            if let Err(e) = res {
+                error!(error = ?e, table_id = src_table_id, "failed to copy table");
+            }
 
-                if let Err(e) = event_sender
-                    .send(TableEvent::FinishInitialCopy {
-                        start_lsn: start_lsn.into(),
-                    })
-                    .await
-                {
-                    error!(error = ?e, table_id = src_table_id, "failed to send FinishTableCopy command");
-                }
-            });
+            // Commit the transaction
+            copy_source
+                .commit_transaction()
+                .await
+                .expect("failed to commit transaction");
+
+            if let Err(e) = event_sender
+                .send(TableEvent::FinishInitialCopy {
+                    start_lsn: start_lsn.into(),
+                })
+                .await
+            {
+                error!(error = ?e, table_id = src_table_id, "failed to send FinishTableCopy command");
+            }
             Ok(true)
         } else {
             // If there are no rows to copy, we still need to add the table to publication.
