@@ -470,6 +470,7 @@ mod tests {
         let backend = Arc::clone(guard.backend());
 
         let backend_clone = Arc::clone(&backend);
+        let table_config = guard.get_serialized_table_config();
         let create_handle = tokio::spawn(async move {
             backend_clone
                 .create_table(
@@ -477,7 +478,7 @@ mod tests {
                     TABLE.to_string(),
                     format!("public.{table_name}"),
                     SRC_URI.to_string(),
-                    guard.get_serialized_table_config(),
+                    table_config,
                     None, /* input_schema */
                 )
                 .await
@@ -512,6 +513,59 @@ mod tests {
         assert_eq!(ids.len(), expected.len());
         assert_eq!(ids, expected);
 
+        initial_client
+            .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
+            .await
+            .unwrap();
+        let _ = backend
+            .drop_table(SCHEMA.to_string(), TABLE.to_string())
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_initial_copy_handles_empty_table_simple() {
+        let (initial_client, connection) = connect(SRC_URI, NoTls).await.unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        let table_name = "copy_empty";
+
+        // Create empty table
+        initial_client
+            .simple_query(&format!(
+                "DROP TABLE IF EXISTS {table_name};
+                 CREATE TABLE {table_name} (id BIGINT PRIMARY KEY, name TEXT);"
+            ))
+            .await
+            .unwrap();
+
+        // Spin up backend and register the table
+        let (guard, _) = TestGuard::new(None, true).await;
+        let backend = guard.backend();
+        backend
+            .create_table(
+                SCHEMA.to_string(),
+                TABLE.to_string(),
+                format!("public.{table_name}"),
+                SRC_URI.to_string(),
+                guard.get_serialized_table_config(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Scan should yield empty set; also exercises the early no-copy branch
+        let ids = ids_from_state(
+            &backend
+                .scan_table(SCHEMA.to_string(), TABLE.to_string(), None)
+                .await
+                .unwrap(),
+        );
+        assert!(ids.is_empty());
+
+        // Cleanup
         initial_client
             .simple_query(&format!("DROP TABLE IF EXISTS {table_name};"))
             .await
