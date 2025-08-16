@@ -343,7 +343,7 @@ impl TableHandler {
                         uuid: uuid::Uuid::new_v4(),
                         force_create: true,
                         dump_snapshot: false,
-                        skip_iceberg_snapshot: true,
+                        skip_iceberg_snapshot: false,
                         index_merge_option: MaintenanceOption::Skip,
                         data_compaction_option: MaintenanceOption::Skip,
                     }));
