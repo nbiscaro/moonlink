@@ -425,7 +425,7 @@ impl TextFormatConverter {
                     }
                 }
             }
-            let val = if !val_quoted && val_str.to_lowercase() == "null" {
+            let val = if !val_quoted && val_str.eq_ignore_ascii_case("null") {
                 None
             } else {
                 parse(&val_str)?

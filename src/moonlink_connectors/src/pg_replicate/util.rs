@@ -207,7 +207,7 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
         ArrayCell::String(values) => values
             .into_iter()
             .map(|v| {
-                v.map(|s| RowValue::ByteArray(s.as_bytes().to_vec()))
+                v.map(|s| RowValue::ByteArray(s.into_bytes()))
                     .unwrap_or(RowValue::Null)
             })
             .collect(),
@@ -297,16 +297,13 @@ fn convert_array_cell(cell: ArrayCell) -> Vec<RowValue> {
         ArrayCell::Json(values) => values
             .into_iter()
             .map(|v| {
-                v.map(|j| RowValue::ByteArray(j.to_string().as_bytes().to_vec()))
+                v.map(|j| RowValue::ByteArray(serde_json::to_vec(&j).unwrap()))
                     .unwrap_or(RowValue::Null)
             })
             .collect(),
         ArrayCell::Bytes(values) => values
             .into_iter()
-            .map(|v| {
-                v.map(|b| RowValue::ByteArray(b.to_vec()))
-                    .unwrap_or(RowValue::Null)
-            })
+            .map(|v| v.map(RowValue::ByteArray).unwrap_or(RowValue::Null))
             .collect(),
         ArrayCell::Composite(values) => values
             .into_iter()
@@ -332,7 +329,7 @@ impl From<Cell> for RowValue {
             Cell::F32(value) => RowValue::Float32(value),
             Cell::F64(value) => RowValue::Float64(value),
             Cell::Bool(value) => RowValue::Bool(value),
-            Cell::String(value) => RowValue::ByteArray(value.as_bytes().to_vec()),
+            Cell::String(value) => RowValue::ByteArray(value.into_bytes()),
             Cell::Date(value) => {
                 RowValue::Int32(value.signed_duration_since(ARROW_EPOCH).num_days() as i32)
             }
@@ -344,7 +341,7 @@ impl From<Cell> for RowValue {
             Cell::TimeStamp(value) => RowValue::Int64(value.and_utc().timestamp_micros()),
             Cell::TimeStampTz(value) => RowValue::Int64(value.timestamp_micros()),
             Cell::Uuid(value) => RowValue::FixedLenByteArray(*value.as_bytes()),
-            Cell::Json(value) => RowValue::ByteArray(value.to_string().as_bytes().to_vec()),
+            Cell::Json(value) => RowValue::ByteArray(serde_json::to_vec(&value).unwrap()),
             Cell::Bytes(value) => RowValue::ByteArray(value),
             Cell::Array(value) => RowValue::Array(convert_array_cell(value)),
             Cell::Composite(value) => {
