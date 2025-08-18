@@ -111,7 +111,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn test_scan_empty_table() {
-        let (guard, client) = TestGuard::new(Some("empty_table"), true).await;
+        let (guard, _client) = TestGuard::new(Some("empty_table"), true).await;
         let backend = guard.backend();
         let ids = ids_from_state(
             &backend
