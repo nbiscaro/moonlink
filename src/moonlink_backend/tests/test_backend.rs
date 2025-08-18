@@ -108,6 +108,20 @@ mod tests {
         assert_eq!(ids, HashSet::from([1, 2]));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_scan_empty_table() {
+        let (guard, client) = TestGuard::new(Some("empty_table"), true).await;
+        let backend = guard.backend();
+        let ids = ids_from_state(
+            &backend
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), None)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(ids, HashSet::new());
+    }
+
     /// Validates that `create_iceberg_snapshot` writes Iceberg metadata.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
