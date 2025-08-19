@@ -1342,9 +1342,9 @@ dependencies = [
 
 [[package]]
 name = "cfg-if"
-version = "1.0.1"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9555578bc9e57714c812a1f84e4fc5b4d21fcb063490c624de019f7464c91268"
+checksum = "2fd1289c04a9ea8cb22300a459a72a385d7c73d3259e2ed7dcb2af674838cfa9"
 
 [[package]]
 name = "cfg_aliases"
@@ -4305,6 +4305,7 @@ dependencies = [
  "parquet",
  "pg_escape",
  "pin-project-lite",
+ "postgres-protocol",
  "postgres-replication",
  "serde_json",
  "serial_test",
@@ -4640,7 +4641,7 @@ dependencies = [
  "md-5",
  "parking_lot",
  "percent-encoding",
- "quick-xml 0.38.1",
+ "quick-xml 0.38.2",
  "rand 0.9.2",
  "reqwest",
  "ring",
@@ -5109,7 +5110,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.7"
-source = "git+https://github.com/Mooncake-Labs/rust-postgres.git?rev=4fda9c1bece3b93359ca1eb2779458fc1c080eae#4fda9c1bece3b93359ca1eb2779458fc1c080eae"
+source = "git+https://github.com/nbiscaro/rust-postgres.git?rev=759ed9e#759ed9ecc73ad704ddee99d4681f833668b43b89"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
@@ -5126,7 +5127,7 @@ dependencies = [
 [[package]]
 name = "postgres-replication"
 version = "0.6.7"
-source = "git+https://github.com/Mooncake-Labs/rust-postgres.git?rev=4fda9c1bece3b93359ca1eb2779458fc1c080eae#4fda9c1bece3b93359ca1eb2779458fc1c080eae"
+source = "git+https://github.com/nbiscaro/rust-postgres.git?rev=759ed9e#759ed9ecc73ad704ddee99d4681f833668b43b89"
 dependencies = [
  "byteorder",
  "bytes",
@@ -5141,7 +5142,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.7"
-source = "git+https://github.com/Mooncake-Labs/rust-postgres.git?rev=4fda9c1bece3b93359ca1eb2779458fc1c080eae#4fda9c1bece3b93359ca1eb2779458fc1c080eae"
+source = "git+https://github.com/nbiscaro/rust-postgres.git?rev=759ed9e#759ed9ecc73ad704ddee99d4681f833668b43b89"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -5339,9 +5340,9 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.38.1"
+version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9845d9dccf565065824e69f9f235fafba1587031eda353c1f1561cd6a6be78f4"
+checksum = "d200a41a7797e6461bd04e4e95c3347053a731c32c87f066f2f0dda22dbdbba8"
 dependencies = [
  "memchr",
  "serde",
@@ -6191,9 +6192,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.142"
+version = "1.0.143"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "030fedb782600dcbd6f02d479bf0d817ac3bb40d644745b769d6a96bc3afc5a7"
+checksum = "d401abef1d108fbd9cbaebc3e46611f4b1021f714a0597a71f41ee463f5f4a5a"
 dependencies = [
  "itoa",
  "memchr",
@@ -6844,15 +6845,15 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "tempfile"
-version = "3.20.0"
+version = "3.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8a64e3985349f2441a1a9ef0b853f869006c3855f2cda6862a94d26ebb9d6a1"
+checksum = "15b61f8f20e3a6f7e0649d825294eaf317edce30f82cf6026e7e4cb9222a7d1e"
 dependencies = [
  "fastrand",
  "getrandom 0.3.3",
  "once_cell",
  "rustix 1.0.8",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7062,7 +7063,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.11"
-source = "git+https://github.com/Mooncake-Labs/rust-postgres.git?rev=4fda9c1bece3b93359ca1eb2779458fc1c080eae#4fda9c1bece3b93359ca1eb2779458fc1c080eae"
+source = "git+https://github.com/nbiscaro/rust-postgres.git?rev=759ed9e#759ed9ecc73ad704ddee99d4681f833668b43b89"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -7674,11 +7675,11 @@ checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
 
 [[package]]
 name = "winapi-util"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
+checksum = "0978bf7171b3d90bac376700cb56d606feb40f251a475a5d6634613564460b22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
