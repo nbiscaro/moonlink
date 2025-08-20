@@ -7,6 +7,7 @@ use crate::pg_replicate::{
 use moonlink::TableEvent;
 use postgres_replication::protocol::Column as ReplicationColumn;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::mpsc::{error::TrySendError, Sender};
@@ -44,33 +45,69 @@ pub struct Sink {
     /// Streaming hot-path cache of the last processed (xid, table_id, lsn).
     /// Skips streaming state lookup when the next row has the same xid and table.
     streaming_last_key: Option<(u32, SrcTableId, u64)>,
-    /// Deferred events to be sent after the current transaction is committed.
-    deferred_sends: Vec<(Sender<TableEvent>, TableEvent)>,
+    /// Deferred events to be sent when the channel has capacity.
+    deferred_sends: HashMap<SrcTableId, VecDeque<TableEvent>>,
 }
 
 impl Sink {
     #[inline(always)]
     fn send_table_event_or_defer(
-        deferred_sends: &mut Vec<(Sender<TableEvent>, TableEvent)>,
+        table_id: &SrcTableId,
+        deferred_sends: &mut HashMap<SrcTableId, VecDeque<TableEvent>>,
         event_sender: &Sender<TableEvent>,
         event: TableEvent,
     ) -> Result<(), tokio::sync::mpsc::error::SendError<TableEvent>> {
         match event_sender.try_send(event) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(event)) => {
-                deferred_sends.push((event_sender.clone(), event));
+                deferred_sends
+                    .entry(*table_id)
+                    .or_default()
+                    .push_back(event);
                 Ok(())
             }
             Err(TrySendError::Closed(event)) => Err(tokio::sync::mpsc::error::SendError(event)),
         }
     }
     pub async fn flush_deferred_sends(&mut self) {
-        for (event_sender, event) in self.deferred_sends.drain(..) {
-            if let Err(e) = event_sender.send(event).await {
-                warn!(error = ?e, "failed to send deferred event");
+        let table_ids: Vec<SrcTableId> = self.deferred_sends.keys().copied().collect();
+
+        for table_id in table_ids {
+            if let Some(mut event_queue) = self.deferred_sends.remove(&table_id) {
+                let sender = self
+                    .get_event_sender_for(table_id)
+                    .expect("Table should have sender if it has deferred events");
+
+                // send the events with FIFO drain
+                while !event_queue.is_empty() {
+                    match sender.try_reserve() {
+                        Ok(permit) => {
+                            permit.send(event_queue.pop_front().unwrap());
+                        }
+                        Err(TrySendError::Full(_)) => {
+                            // Wait for exactly one slot to appear, then send the front item.
+                            match sender.reserve().await {
+                                Ok(permit) => {
+                                    permit.send(event_queue.pop_front().unwrap());
+                                }
+                                Err(_) => {
+                                    warn!(table_id, "receiver closed while flushing");
+                                    event_queue.clear();
+                                    break;
+                                }
+                            }
+                        }
+                        Err(TrySendError::Closed(_)) => {
+                            warn!(table_id, "receiver closed before flush");
+                            event_queue.clear();
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
+
     pub fn new(replication_state: Arc<ReplicationState>) -> Self {
         Self {
             event_senders: HashMap::new(),
@@ -85,7 +122,7 @@ impl Sink {
             relation_cache: HashMap::new(),
             cached_event_sender: None,
             streaming_last_key: None,
-            deferred_sends: Vec::new(),
+            deferred_sends: HashMap::new(),
         }
     }
 }
@@ -219,6 +256,7 @@ impl Sink {
                     }
                     if let Some(event_sender) = event_sender {
                         if let Err(e) = Self::send_table_event_or_defer(
+                            table_id,
                             &mut self.deferred_sends,
                             &event_sender,
                             TableEvent::Commit {
@@ -254,6 +292,7 @@ impl Sink {
                         }
                         if let Some(event_sender) = event_sender {
                             if let Err(e) = Self::send_table_event_or_defer(
+                                table_id,
                                 &mut self.deferred_sends,
                                 &event_sender,
                                 TableEvent::Commit {
@@ -277,6 +316,7 @@ impl Sink {
                 let event_sender = self.get_event_sender_for(table_id).cloned();
                 if let Some(event_sender) = event_sender {
                     if let Err(e) = Self::send_table_event_or_defer(
+                        &table_id,
                         &mut self.deferred_sends,
                         &event_sender,
                         TableEvent::Append {
@@ -296,6 +336,7 @@ impl Sink {
                 let event_sender = self.get_event_sender_for(table_id).cloned();
                 if let Some(event_sender) = event_sender {
                     if let Err(e) = Self::send_table_event_or_defer(
+                        &table_id,
                         &mut self.deferred_sends,
                         &event_sender,
                         TableEvent::Delete {
@@ -308,6 +349,7 @@ impl Sink {
                         warn!(error = ?e, "failed to send delete event");
                     }
                     if let Err(e) = Self::send_table_event_or_defer(
+                        &table_id,
                         &mut self.deferred_sends,
                         &event_sender,
                         TableEvent::Append {
@@ -327,6 +369,7 @@ impl Sink {
                 let event_sender = self.get_event_sender_for(table_id).cloned();
                 if let Some(event_sender) = event_sender {
                     if let Err(e) = Self::send_table_event_or_defer(
+                        &table_id,
                         &mut self.deferred_sends,
                         &event_sender,
                         TableEvent::Delete {
@@ -377,6 +420,7 @@ impl Sink {
                         let event_sender = self.event_senders.get(table_id).cloned();
                         if let Some(event_sender) = event_sender {
                             if let Err(e) = Self::send_table_event_or_defer(
+                                table_id,
                                 &mut self.deferred_sends,
                                 &event_sender,
                                 TableEvent::StreamAbort {
