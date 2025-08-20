@@ -25,7 +25,7 @@ use futures::StreamExt;
 use moonlink::{
     MoonlinkTableConfig, ObjectStorageCache, ReadStateFilepathRemap, TableEvent, WalManager,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Error, ErrorKind};
 use std::mem::take;
 use std::sync::Arc;
@@ -587,6 +587,7 @@ pub async fn run_event_loop(
                     break;
                 }
 
+                let mut ok_events: Vec<CdcEvent> = Vec::new();
                 for event in batch.drain(..n) {
                     match event {
                         Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MissingSchema(_))) => {
@@ -602,14 +603,26 @@ pub async fn run_event_loop(
                             break;
                         }
                         Ok(event) => {
-                            let res = sink.process_cdc_event(event).await.unwrap();
-                            if let Some(SchemaChangeRequest(src_table_id)) = res {
-                                let table_schema = postgres_source.fetch_table_schema(Some(src_table_id), None, None).await?;
-                                sink.alter_table(src_table_id, &table_schema).await;
-                                stream.as_mut().update_table_schema(table_schema);
-                            }
+                            ok_events.push(event);
                         }
                     }
+                }
+
+                // Fast-path for events: no awaits
+                let mut schema_reqs: Vec<SchemaChangeRequest> = Vec::new();
+                for event in ok_events {
+                    if let Some(req) = sink.process_cdc_event(event).unwrap() {
+                        schema_reqs.push(req);
+                    }
+                }
+                // Single await flush to flush whatever was back pressued (should usually be empty)
+                sink.flush_deferred_sends().await;
+
+                // Apply schema changes once per table (deduped)
+                for src_table_id in schema_reqs.into_iter().map(|SchemaChangeRequest(id)| id).collect::<HashSet<_>>() {
+                    let table_schema = postgres_source.fetch_table_schema(Some(src_table_id), None, None).await?;
+                    sink.alter_table(src_table_id, &table_schema).await;
+                    stream.as_mut().update_table_schema(table_schema);
                 }
             },
             _ = &mut connection => {

@@ -44,17 +44,31 @@ pub struct Sink {
     /// Streaming hot-path cache of the last processed (xid, table_id, lsn).
     /// Skips streaming state lookup when the next row has the same xid and table.
     streaming_last_key: Option<(u32, SrcTableId, u64)>,
+    /// Deferred events to be sent after the current transaction is committed.
+    deferred_sends: Vec<(Sender<TableEvent>, TableEvent)>,
 }
 
 impl Sink {
-    async fn send_table_event(
+    #[inline(always)]
+    fn send_table_event_or_defer(
+        deferred_sends: &mut Vec<(Sender<TableEvent>, TableEvent)>,
         event_sender: &Sender<TableEvent>,
         event: TableEvent,
     ) -> Result<(), tokio::sync::mpsc::error::SendError<TableEvent>> {
         match event_sender.try_send(event) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(event)) => event_sender.send(event).await,
+            Err(TrySendError::Full(event)) => {
+                deferred_sends.push((event_sender.clone(), event));
+                Ok(())
+            }
             Err(TrySendError::Closed(event)) => Err(tokio::sync::mpsc::error::SendError(event)),
+        }
+    }
+    pub async fn flush_deferred_sends(&mut self) {
+        for (event_sender, event) in self.deferred_sends.drain(..) {
+            if let Err(e) = event_sender.send(event).await {
+                warn!(error = ?e, "failed to send deferred event");
+            }
         }
     }
     pub fn new(replication_state: Arc<ReplicationState>) -> Self {
@@ -71,6 +85,7 @@ impl Sink {
             relation_cache: HashMap::new(),
             cached_event_sender: None,
             streaming_last_key: None,
+            deferred_sends: Vec::new(),
         }
     }
 }
@@ -179,7 +194,7 @@ impl Sink {
         }
     }
 
-    pub async fn process_cdc_event(
+    pub fn process_cdc_event(
         &mut self,
         event: CdcEvent,
     ) -> Result<Option<SchemaChangeRequest>, Infallible> {
@@ -196,23 +211,22 @@ impl Sink {
             CdcEvent::Commit(commit_body) => {
                 debug!(end_lsn = commit_body.end_lsn(), "commit transaction");
                 for table_id in &self.transaction_state.touched_tables {
-                    let event_sender = self.event_senders.get(table_id);
+                    let event_sender = self.event_senders.get(table_id).cloned();
                     if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id).cloned() {
                         if let Err(e) = commit_lsn_tx.send(commit_body.end_lsn()) {
                             warn!(error = ?e, "failed to send commit lsn");
                         }
                     }
                     if let Some(event_sender) = event_sender {
-                        if let Err(e) = Self::send_table_event(
-                            event_sender,
+                        if let Err(e) = Self::send_table_event_or_defer(
+                            &mut self.deferred_sends,
+                            &event_sender,
                             TableEvent::Commit {
                                 lsn: commit_body.end_lsn(),
                                 xact_id: None,
                                 is_recovery: false,
                             },
-                        )
-                        .await
-                        {
+                        ) {
                             warn!(error = ?e, "failed to send commit event");
                         }
                     }
@@ -232,23 +246,22 @@ impl Sink {
                 );
                 if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
                     for table_id in &tables_in_txn.touched_tables {
-                        let event_sender = self.event_senders.get(table_id);
+                        let event_sender = self.event_senders.get(table_id).cloned();
                         if let Some(commit_lsn_tx) = self.commit_lsn_txs.get(table_id).cloned() {
                             if let Err(e) = commit_lsn_tx.send(stream_commit_body.end_lsn()) {
                                 warn!(error = ?e, "failed to send stream commit lsn");
                             }
                         }
                         if let Some(event_sender) = event_sender {
-                            if let Err(e) = Self::send_table_event(
-                                event_sender,
+                            if let Err(e) = Self::send_table_event_or_defer(
+                                &mut self.deferred_sends,
+                                &event_sender,
                                 TableEvent::Commit {
                                     lsn: stream_commit_body.end_lsn(),
                                     xact_id: Some(xact_id),
                                     is_recovery: false,
                                 },
-                            )
-                            .await
-                            {
+                            ) {
                                 warn!(error = ?e, "failed to send stream commit event");
                             }
                         }
@@ -261,9 +274,11 @@ impl Sink {
             }
             CdcEvent::Insert((table_id, table_row, xact_id)) => {
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
-                if let Some(event_sender) = self.get_event_sender_for(table_id) {
-                    if let Err(e) = Self::send_table_event(
-                        event_sender,
+                let event_sender = self.get_event_sender_for(table_id).cloned();
+                if let Some(event_sender) = event_sender {
+                    if let Err(e) = Self::send_table_event_or_defer(
+                        &mut self.deferred_sends,
+                        &event_sender,
                         TableEvent::Append {
                             row: PostgresTableRow(table_row).into(),
                             lsn: final_lsn,
@@ -271,31 +286,30 @@ impl Sink {
                             is_copied: false,
                             is_recovery: false,
                         },
-                    )
-                    .await
-                    {
+                    ) {
                         warn!(error = ?e, "failed to send append event");
                     }
                 }
             }
             CdcEvent::Update((table_id, old_table_row, new_table_row, xact_id)) => {
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
-                if let Some(event_sender) = self.get_event_sender_for(table_id) {
-                    if let Err(e) = Self::send_table_event(
-                        event_sender,
+                let event_sender = self.get_event_sender_for(table_id).cloned();
+                if let Some(event_sender) = event_sender {
+                    if let Err(e) = Self::send_table_event_or_defer(
+                        &mut self.deferred_sends,
+                        &event_sender,
                         TableEvent::Delete {
                             row: PostgresTableRow(old_table_row.unwrap()).into(),
                             lsn: final_lsn,
                             xact_id,
                             is_recovery: false,
                         },
-                    )
-                    .await
-                    {
+                    ) {
                         warn!(error = ?e, "failed to send delete event");
                     }
-                    if let Err(e) = Self::send_table_event(
-                        event_sender,
+                    if let Err(e) = Self::send_table_event_or_defer(
+                        &mut self.deferred_sends,
+                        &event_sender,
                         TableEvent::Append {
                             row: PostgresTableRow(new_table_row).into(),
                             lsn: final_lsn,
@@ -303,27 +317,25 @@ impl Sink {
                             is_copied: false,
                             is_recovery: false,
                         },
-                    )
-                    .await
-                    {
+                    ) {
                         warn!(error = ?e, "failed to send append event");
                     }
                 }
             }
             CdcEvent::Delete((table_id, table_row, xact_id)) => {
                 let final_lsn = self.get_final_lsn(table_id, xact_id);
-                if let Some(event_sender) = self.get_event_sender_for(table_id) {
-                    if let Err(e) = Self::send_table_event(
-                        event_sender,
+                let event_sender = self.get_event_sender_for(table_id).cloned();
+                if let Some(event_sender) = event_sender {
+                    if let Err(e) = Self::send_table_event_or_defer(
+                        &mut self.deferred_sends,
+                        &event_sender,
                         TableEvent::Delete {
                             row: PostgresTableRow(table_row).into(),
                             lsn: final_lsn,
                             xact_id,
                             is_recovery: false,
                         },
-                    )
-                    .await
-                    {
+                    ) {
                         warn!(error = ?e, "failed to send delete event");
                     }
                 }
@@ -362,17 +374,17 @@ impl Sink {
                 warn!(xact_id, "stream transaction aborted");
                 if let Some(tables_in_txn) = self.streaming_transactions_state.get(&xact_id) {
                     for table_id in &tables_in_txn.touched_tables {
-                        if let Some(event_sender) = self.event_senders.get(table_id) {
-                            if let Err(e) = Self::send_table_event(
-                                event_sender,
+                        let event_sender = self.event_senders.get(table_id).cloned();
+                        if let Some(event_sender) = event_sender {
+                            if let Err(e) = Self::send_table_event_or_defer(
+                                &mut self.deferred_sends,
+                                &event_sender,
                                 TableEvent::StreamAbort {
                                     xact_id,
                                     is_recovery: false,
                                     closes_incomplete_wal_transaction: false,
                                 },
-                            )
-                            .await
-                            {
+                            ) {
                                 warn!(error = ?e, "failed to send stream abort event");
                             }
                         }
@@ -433,7 +445,6 @@ mod tests {
                     TableRow { values: vec![] },
                     xid,
                 )))
-                .await
                 .unwrap();
         }
 
@@ -478,13 +489,11 @@ mod tests {
         for _ in 0..5 {
             let _ = sink
                 .process_cdc_event(CdcEvent::Insert((a, TableRow { values: vec![] }, None)))
-                .await
                 .unwrap();
         }
         for _ in 0..7 {
             let _ = sink
                 .process_cdc_event(CdcEvent::Insert((b, TableRow { values: vec![] }, None)))
-                .await
                 .unwrap();
         }
 
@@ -540,7 +549,6 @@ mod tests {
                 TableRow { values: vec![] },
                 xid1,
             )))
-            .await
             .unwrap();
         assert_eq!(sink.streaming_last_key, Some((xid1.unwrap(), table_id, 0)));
         // Insert with xid2 must not use xid1 cache; updates cache to xid2
@@ -550,7 +558,6 @@ mod tests {
                 TableRow { values: vec![] },
                 xid2,
             )))
-            .await
             .unwrap();
         assert_eq!(sink.streaming_last_key, Some((xid2.unwrap(), table_id, 0)));
         // Back to xid1 updates cache back to xid1
@@ -560,7 +567,6 @@ mod tests {
                 TableRow { values: vec![] },
                 xid1,
             )))
-            .await
             .unwrap();
         assert_eq!(sink.streaming_last_key, Some((xid1.unwrap(), table_id, 0)));
 
@@ -602,12 +608,10 @@ mod tests {
         // A then B under same xid
         let _ = sink
             .process_cdc_event(CdcEvent::Insert((a, TableRow { values: vec![] }, xid)))
-            .await
             .unwrap();
         assert_eq!(sink.streaming_last_key, Some((xid.unwrap(), a, 0)));
         let _ = sink
             .process_cdc_event(CdcEvent::Insert((b, TableRow { values: vec![] }, xid)))
-            .await
             .unwrap();
         assert_eq!(sink.streaming_last_key, Some((xid.unwrap(), b, 0)));
 
@@ -644,7 +648,6 @@ mod tests {
                 TableRow { values: vec![] },
                 xid1,
             )))
-            .await
             .unwrap();
         assert!(sink.cached_event_sender.is_some());
 
@@ -655,7 +658,6 @@ mod tests {
                 TableRow { values: vec![] },
                 xid2,
             )))
-            .await
             .unwrap();
         assert!(sink.cached_event_sender.is_some());
 
@@ -683,7 +685,6 @@ mod tests {
                     TableRow { values: vec![] },
                     None,
                 )))
-                .await
                 .unwrap();
         }
         assert_eq!(sink.transaction_state.touched_tables, vec![table_id]);
@@ -705,7 +706,6 @@ mod tests {
                     TableRow { values: vec![] },
                     None,
                 )))
-                .await
                 .unwrap();
         }
         assert_eq!(sink.transaction_state.touched_tables, vec![table_id]);
