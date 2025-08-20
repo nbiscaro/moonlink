@@ -27,7 +27,7 @@ num-traits = { workspace = true }
 parquet = { workspace = true }
 pg_escape = "0.1"
 pin-project-lite = "0.2"
-postgres-protocol = { git = "https://github.com/nbiscaro/rust-postgres.git", rev = "759ed9e" }
+postgres-protocol = { git = "https://github.com/nbiscaro/rust-postgres.git", rev = "3385145" }
 postgres-replication = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -5110,7 +5110,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.7"
-source = "git+https://github.com/nbiscaro/rust-postgres.git?rev=759ed9e#759ed9ecc73ad704ddee99d4681f833668b43b89"
+source = "git+https://github.com/nbiscaro/rust-postgres.git?rev=3385145#338514533f3771f9cfc42202b20011e398d19895"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
@@ -5127,7 +5127,7 @@ dependencies = [
 [[package]]
 name = "postgres-replication"
 version = "0.6.7"
-source = "git+https://github.com/nbiscaro/rust-postgres.git?rev=759ed9e#759ed9ecc73ad704ddee99d4681f833668b43b89"
+source = "git+https://github.com/nbiscaro/rust-postgres.git?rev=3385145#338514533f3771f9cfc42202b20011e398d19895"
 dependencies = [
  "byteorder",
  "bytes",
@@ -5142,7 +5142,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.7"
-source = "git+https://github.com/nbiscaro/rust-postgres.git?rev=759ed9e#759ed9ecc73ad704ddee99d4681f833668b43b89"
+source = "git+https://github.com/nbiscaro/rust-postgres.git?rev=3385145#338514533f3771f9cfc42202b20011e398d19895"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -7063,7 +7063,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.11"
-source = "git+https://github.com/nbiscaro/rust-postgres.git?rev=759ed9e#759ed9ecc73ad704ddee99d4681f833668b43b89"
+source = "git+https://github.com/nbiscaro/rust-postgres.git?rev=3385145#338514533f3771f9cfc42202b20011e398d19895"
 dependencies = [
  "async-trait",
  "byteorder",

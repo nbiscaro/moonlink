@@ -24,7 +24,7 @@ allow = [
 unknown-git = "deny"
 allow-git = [
     "https://github.com/apache/iceberg-rust.git",
-    "https://github.com/nbiscaro/rust-postgres.git?rev=759ed9e",
+    "https://github.com/nbiscaro/rust-postgres.git?rev=3385145",
 ]
 
 # TODO(hjiang): Cleanup these unmaintained crates.
