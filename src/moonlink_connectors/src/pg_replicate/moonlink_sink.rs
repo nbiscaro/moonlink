@@ -7,10 +7,11 @@ use crate::pg_replicate::{
 use moonlink::TableEvent;
 use postgres_replication::protocol::Column as ReplicationColumn;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::mpsc::{error::TrySendError, Sender};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, warn};
 
@@ -47,13 +48,18 @@ pub struct Sink {
 }
 
 impl Sink {
+    #[inline(always)]
     async fn send_table_event(
         event_sender: &Sender<TableEvent>,
         event: TableEvent,
     ) -> Result<(), tokio::sync::mpsc::error::SendError<TableEvent>> {
         match event_sender.try_send(event) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(event)) => event_sender.send(event).await,
+            Err(TrySendError::Full(event)) => {
+                let permit = event_sender.reserve().await.expect("event receiver closed");
+                permit.send(event);
+                Ok(())
+            }
             Err(TrySendError::Closed(event)) => Err(tokio::sync::mpsc::error::SendError(event)),
         }
     }
