@@ -10,7 +10,7 @@ pub mod table_init;
 pub mod util;
 
 use crate::pg_replicate::clients::postgres::{build_tls_connector, ReplicationClient};
-use crate::pg_replicate::conversions::cdc_event::CdcEventConversionError;
+use crate::pg_replicate::conversions::cdc_event::{CdcEvent, CdcEventConversionError};
 use crate::pg_replicate::initial_copy::copy_table_stream_impl;
 use crate::pg_replicate::moonlink_sink::{SchemaChangeRequest, Sink};
 use crate::pg_replicate::postgres_source::{
@@ -26,7 +26,7 @@ use moonlink::{
 };
 use native_tls::{Certificate, TlsConnector};
 use postgres_native_tls::{MakeTlsConnector, TlsStream};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Error, ErrorKind};
 use std::mem::take;
@@ -537,6 +537,10 @@ pub async fn run_event_loop(
     // Now run the main event loop
     pin!(stream);
 
+    const MAX_EVENTS_PER_WAKE: usize = 512;
+    let mut batch: Vec<std::result::Result<CdcEvent, CdcStreamError>> =
+        Vec::with_capacity(MAX_EVENTS_PER_WAKE);
+
     debug!("replication event loop started");
 
     let mut status_interval = tokio::time::interval(Duration::from_secs(10));
@@ -581,35 +585,46 @@ pub async fn run_event_loop(
                     break;
                 }
             },
-            event = StreamExt::next(&mut stream) => {
-                let Some(event_result) = event else {
+            n = stream.as_mut().next_batch_msgs(&mut batch, MAX_EVENTS_PER_WAKE) => {
+                if n == 0 {
                     error!("replication stream ended unexpectedly");
                     break;
-                };
+                }
 
-                match event_result {
-                    Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MissingSchema(_))) => {
-                        continue;
-                    }
-                    Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MessageNotSupported)) => {
-                        // TODO: Add support for Truncate and Origin messages and remove this.
-                        warn!("message not supported");
-                        continue;
-                    }
-                    Err(e) => {
-                        error!(error = ?e, "cdc stream error");
-                        break;
-                    }
-                    Ok(event) => {
-                        let res = sink.process_cdc_event(event).await.unwrap();
-                        if let Some(SchemaChangeRequest(src_table_id)) = res {
-                            let table_schema = postgres_source.fetch_table_schema(Some(src_table_id), None, None).await?;
-                            sink.alter_table(src_table_id, &table_schema).await;
-                            stream.as_mut().update_table_schema(table_schema);
+                let mut ok_events: Vec<CdcEvent> = Vec::new();
+                for event in batch.drain(..n) {
+                    match event {
+                        Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MissingSchema(_))) => {
+                            continue;
+                        }
+                        Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MessageNotSupported)) => {
+                            // TODO: Add support for Truncate and Origin messages and remove this.
+                            warn!("message not supported");
+                            continue;
+                        }
+                        Err(e) => {
+                            error!(error = ?e, "cdc stream error");
+                            break;
+                        }
+                        Ok(event) => {
+                            ok_events.push(event);
                         }
                     }
                 }
-            }
+
+                let mut schema_reqs: Vec<SchemaChangeRequest> = Vec::new();
+                for event in ok_events {
+                    if let Some(req) = sink.process_cdc_event(event).await.unwrap() {
+                        schema_reqs.push(req);
+                    }
+                }
+                // Apply schema changes once per table (deduped)
+                for src_table_id in schema_reqs.into_iter().map(|SchemaChangeRequest(id)| id).collect::<HashSet<_>>() {
+                    let table_schema = postgres_source.fetch_table_schema(Some(src_table_id), None, None).await?;
+                    sink.alter_table(src_table_id, &table_schema).await;
+                    stream.as_mut().update_table_schema(table_schema);
+                }
+            },
             _ = &mut connection => {
                 error!("replication connection closed");
                 break;
