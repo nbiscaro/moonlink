@@ -722,4 +722,42 @@ mod tests {
             matches!(rx.recv().await.unwrap(), TableEvent::Append { .. });
         }
     }
+
+    #[tokio::test]
+    async fn test_send_table_event_ok() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let res = Sink::send_table_event(&tx, TableEvent::DropTable).await;
+        assert!(res.is_ok());
+        let msg = rx.recv().await;
+        assert!(matches!(msg, Some(TableEvent::DropTable)));
+    }
+
+    #[tokio::test]
+    async fn test_send_table_event_full_reserve_path() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(TableEvent::DropTable).unwrap();
+
+        let send_future = Sink::send_table_event(&tx, TableEvent::DropTable);
+        let drain_future = async {
+            // Give the sender a moment to hit the reserve path
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            // Free one slot so reserve() can complete
+            let first = rx.recv().await;
+            assert!(matches!(first, Some(TableEvent::DropTable)));
+            // Receive the second event that was sent via the permit
+            let second = rx.recv().await;
+            assert!(matches!(second, Some(TableEvent::DropTable)));
+        };
+
+        let (send_res, _) = tokio::join!(send_future, drain_future);
+        assert!(send_res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_send_table_event_closed() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let res = Sink::send_table_event(&tx, TableEvent::DropTable).await;
+        assert!(res.is_err());
+    }
 }
