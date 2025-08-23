@@ -543,7 +543,11 @@ pub async fn run_event_loop(
 
     debug!("replication event loop started");
 
-    let mut status_interval = tokio::time::interval(Duration::from_secs(1));
+    /// We use the same status interval as Postgres wal_receiver default.
+    /// https://github.com/postgres/postgres/blob/c13070a27b63d9ce4850d88a63bf889a6fde26f0/src/backend/utils/misc/guc_tables.c#L2306
+    const DEFAULT_STATUS_INTERVAL: Duration = Duration::from_secs(10);
+
+    let mut status_interval = tokio::time::interval(DEFAULT_STATUS_INTERVAL);
     let mut flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
     let mut wal_flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
 
