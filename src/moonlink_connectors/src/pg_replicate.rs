@@ -543,7 +543,7 @@ pub async fn run_event_loop(
 
     debug!("replication event loop started");
 
-    let mut status_interval = tokio::time::interval(Duration::from_secs(10));
+    let mut status_interval = tokio::time::interval(Duration::from_secs(1));
     let mut flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
     let mut wal_flush_lsn_rxs: HashMap<SrcTableId, watch::Receiver<u64>> = HashMap::new();
 
