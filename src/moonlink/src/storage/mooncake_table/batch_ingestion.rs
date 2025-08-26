@@ -4,9 +4,9 @@ use crate::{
 
 use super::*;
 
-use bytes::Bytes;
 use futures::{stream, StreamExt};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::ParquetRecordBatchStreamBuilder;
+use tokio::fs::File;
 
 impl MooncakeTable {
     /// Batch ingestion the given [`parquet_files`] into mooncake table.
@@ -24,13 +24,18 @@ impl MooncakeTable {
                 let cur_file_id = (start_id as u64) + idx as u64;
                 async move {
                     // TODO(hjiang): Handle remote data file ingestion as well.
-                    let content = tokio::fs::read(&cur_file)
+                    let file = File::open(&cur_file)
                         .await
-                        .unwrap_or_else(|_| panic!("Failed to read {cur_file}"));
-                    let content = Bytes::from(content);
-                    let file_size = content.len();
-                    let builder = ParquetRecordBatchReaderBuilder::try_new(content).unwrap();
-                    let num_rows = builder.metadata().file_metadata().num_rows() as usize;
+                        .unwrap_or_else(|_| panic!("Failed to open {cur_file}"));
+                    let file_size = file
+                        .metadata()
+                        .await
+                        .unwrap_or_else(|_| panic!("Failed to stat {cur_file}"))
+                        .len() as usize;
+                    let stream_builder = ParquetRecordBatchStreamBuilder::new(file)
+                        .await
+                        .unwrap_or_else(|_| panic!("Failed to read parquet footer for {cur_file}"));
+                    let num_rows = stream_builder.metadata().file_metadata().num_rows() as usize;
 
                     let mooncake_data_file = create_data_file(cur_file_id, cur_file.clone());
                     let disk_file_entry = DiskFileEntry {
