@@ -66,6 +66,10 @@ pub enum Error {
     // Parquet parse error.
     #[error("{0}")]
     ParquetError(ErrorStruct),
+
+    // Background writer task failed (panic/cancel/join error).
+    #[error("{0}")]
+    WriterTaskFailed(ErrorStruct),
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -119,6 +123,18 @@ impl Error {
             ),
             status: ErrorStatus::Permanent,
             source: None,
+            location: Some(Location::caller().to_string()),
+        })
+    }
+}
+
+impl From<tokio::task::JoinError> for Error {
+    #[track_caller]
+    fn from(source: tokio::task::JoinError) -> Self {
+        Error::WriterTaskFailed(ErrorStruct {
+            message: format!("Writer task failed: {source}"),
+            status: ErrorStatus::Permanent,
+            source: Some(Arc::new(source.into())),
             location: Some(Location::caller().to_string()),
         })
     }
