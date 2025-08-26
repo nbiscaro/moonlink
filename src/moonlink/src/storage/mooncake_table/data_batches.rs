@@ -2,6 +2,7 @@ use crate::error::Result;
 use crate::row::ColumnArrayBuilder;
 use crate::row::IdentityProp;
 use crate::row::MoonlinkRow;
+use crate::row::RowValue;
 use crate::storage::mooncake_table::batch_id_counter::BatchIdCounter;
 use crate::storage::mooncake_table::delete_vector::BatchDeletionVector;
 use crate::storage::mooncake_table::shared_array::SharedRowBuffer;
@@ -12,7 +13,7 @@ use arrow_schema::Schema;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
-pub(super) struct InMemoryBatch {
+pub struct InMemoryBatch {
     pub(super) data: Option<Arc<RecordBatch>>,
     pub(super) deletions: BatchDeletionVector,
 }
@@ -61,7 +62,7 @@ pub(super) struct BatchEntry {
 
 /// A streaming buffered writer for column-oriented data.
 /// Creates new buffers when the current one is full and links them together.
-pub(super) struct ColumnStoreBuffer {
+pub struct ColumnStoreBuffer {
     /// The Arrow schema defining the structure of the data
     schema: Arc<Schema>,
     /// Maximum number of rows per buffer before creating a new one
@@ -80,7 +81,7 @@ pub(super) struct ColumnStoreBuffer {
 impl ColumnStoreBuffer {
     /// Initialize a new column store buffer with the given schema and buffer size.
     ///
-    pub(super) fn new(
+    pub fn new(
         schema: Arc<Schema>,
         max_rows_per_buffer: usize,
         batch_id_counter: Arc<BatchIdCounter>,
@@ -110,11 +111,39 @@ impl ColumnStoreBuffer {
         }
     }
 
+    /// Append a row for initial copy (append-only, no deletions).
+    /// Skips MoonlinkRow creation and SharedRowBuffer since no deletions occur.
+    /// Returns (batch_id, row_offset, optional_finished_batch).
+    #[allow(clippy::type_complexity)]
+    pub fn append_initial_copy_row(
+        &mut self,
+        values: Vec<RowValue>,
+    ) -> Result<(u64, usize, Option<(u64, Arc<RecordBatch>)>)> {
+        let mut new_batch: Option<(u64, Arc<RecordBatch>)> = None;
+        // Check if we need to finalize the current batch
+        if self.current_row_count >= self.max_rows_per_buffer {
+            new_batch = self.finalize_current_batch()?;
+        }
+
+        // Append values directly to builders - no MoonlinkRow needed
+        values.iter().enumerate().for_each(|(i, cell)| {
+            let _res = self.current_batch_builder[i].append_value(cell);
+            assert!(_res.is_ok());
+        });
+        self.current_row_count += 1;
+
+        Ok((
+            self.in_memory_batches.last().unwrap().id,
+            self.current_row_count - 1,
+            new_batch,
+        ))
+    }
+
     /// Append a row of data to the buffer. If the current buffer is full,
     /// finalize it and start a new one.
     ///
     #[allow(clippy::type_complexity)]
-    pub(super) fn append_row(
+    pub fn append_row(
         &mut self,
         row: MoonlinkRow,
     ) -> Result<(u64, usize, Option<(u64, Arc<RecordBatch>)>)> {
@@ -140,7 +169,7 @@ impl ColumnStoreBuffer {
 
     /// Finalize the current batch, adding it to filled_batches and preparing for a new batch
     ///
-    pub(super) fn finalize_current_batch(&mut self) -> Result<Option<(u64, Arc<RecordBatch>)>> {
+    pub fn finalize_current_batch(&mut self) -> Result<Option<(u64, Arc<RecordBatch>)>> {
         if self.current_row_count == 0 {
             return Ok(None);
         }
