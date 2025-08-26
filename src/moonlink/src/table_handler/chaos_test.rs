@@ -645,7 +645,6 @@ impl ChaosState {
                     row,
                     xact_id: self.get_cur_xact_id(),
                     lsn: self.get_and_update_cur_lsn(),
-                    is_copied: false,
                     is_recovery: false,
                 }])
             }
@@ -656,7 +655,6 @@ impl ChaosState {
                     row,
                     xact_id: self.get_cur_xact_id(),
                     lsn: self.get_and_update_cur_lsn(),
-                    is_copied: false,
                     is_recovery: false,
                 }])
             }
@@ -664,7 +662,6 @@ impl ChaosState {
                 row: self.get_next_row_to_append(),
                 xact_id: self.get_cur_xact_id(),
                 lsn: self.get_and_update_cur_lsn(),
-                is_copied: false,
                 is_recovery: false,
             }]),
             EventKind::Delete => ChaosEvent::create_table_events(vec![TableEvent::Delete {
@@ -688,7 +685,6 @@ impl ChaosState {
                         row: row.clone(),
                         xact_id: self.get_cur_xact_id(),
                         lsn: self.get_and_update_cur_lsn(),
-                        is_copied: false,
                         is_recovery: false,
                     },
                 ])
