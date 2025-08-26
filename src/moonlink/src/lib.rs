@@ -11,6 +11,9 @@ mod union_read;
 pub use error::*;
 pub use event_sync::EventSyncSender;
 pub use mooncake_table_id::MooncakeTableId;
+pub use storage::mooncake_table::batch_id_counter::BatchIdCounter;
+pub use storage::mooncake_table::data_batches::ColumnStoreBuffer;
+pub use storage::parquet_utils::get_default_parquet_properties;
 pub use storage::storage_utils::create_data_file;
 pub(crate) use storage::NonEvictableHandle;
 pub use storage::{

@@ -12,7 +12,7 @@ pub const STREAMING_BATCH_ID_MAX: u64 = 1u64 << 63;
 ///
 /// We give streaming batches the smaller range so that they are always behind the commit point, which points to the most recently added batch of the non-streaming batches.
 /// This ensures batch IDs are always monotonically increasing and unique across all transactions.
-pub(super) struct BatchIdCounter {
+pub struct BatchIdCounter {
     counter: Arc<AtomicU64>,
     is_streaming: bool,
 }

@@ -19,7 +19,7 @@ fn get_default_parquet_properties_builder() -> WriterPropertiesBuilder {
         .set_writer_version(parquet::file::properties::WriterVersion::PARQUET_1_0)
 }
 
-pub(crate) fn get_default_parquet_properties() -> WriterProperties {
+pub fn get_default_parquet_properties() -> WriterProperties {
     let builder = get_default_parquet_properties_builder();
     builder.build()
 }
