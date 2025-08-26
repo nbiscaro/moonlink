@@ -3,6 +3,7 @@
 pub mod clients;
 pub mod conversions;
 pub mod initial_copy;
+pub mod initial_copy_writer;
 pub mod moonlink_sink;
 pub mod postgres_source;
 pub mod table;
@@ -11,7 +12,7 @@ pub mod util;
 
 use crate::pg_replicate::clients::postgres::{build_tls_connector, ReplicationClient};
 use crate::pg_replicate::conversions::cdc_event::{CdcEvent, CdcEventConversionError};
-use crate::pg_replicate::initial_copy::copy_table_stream_impl;
+use crate::pg_replicate::initial_copy::copy_table_stream;
 use crate::pg_replicate::moonlink_sink::{SchemaChangeRequest, Sink};
 use crate::pg_replicate::postgres_source::{
     CdcStreamConfig, CdcStreamError, PostgresSource, PostgresSourceError,
@@ -253,7 +254,8 @@ impl PostgresConnection {
                 .get_table_copy_stream(&schema.table_name, &schema.column_schemas)
                 .await
                 .expect("failed to get table copy stream");
-            let res = copy_table_stream_impl(schema.clone(), stream, &event_sender).await;
+            let res =
+                copy_table_stream(schema.clone(), stream, &event_sender, start_lsn.into()).await;
 
             if let Err(e) = res {
                 error!(error = ?e, table_id = src_table_id, "failed to copy table");
