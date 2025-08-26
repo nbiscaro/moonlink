@@ -175,17 +175,15 @@ pub fn ingestion_events_equal(actual: &TableEvent, expected: &TableEvent) -> boo
                 row: row1,
                 lsn: lsn1,
                 xact_id: xact1,
-                is_copied: copied1,
                 ..
             },
             TableEvent::Append {
                 row: row2,
                 lsn: lsn2,
                 xact_id: xact2,
-                is_copied: copied2,
                 ..
             },
-        ) => row1 == row2 && lsn1 == lsn2 && xact1 == xact2 && copied1 == copied2,
+        ) => row1 == row2 && lsn1 == lsn2 && xact1 == xact2,
         (
             TableEvent::Delete {
                 row: row1,
@@ -306,7 +304,6 @@ pub async fn create_test_wal(wal_config: WalConfig) -> (WalManager, Vec<TableEve
             row: row.clone(),
             xact_id: None,
             lsn: 100 + i,
-            is_copied: false,
             is_recovery: false,
         };
 
@@ -349,7 +346,6 @@ pub fn add_new_example_append_event(
         row: test_row(1, "Alice", 30),
         lsn,
         xact_id,
-        is_copied: false,
         is_recovery: false,
     };
     wal.push(&event);

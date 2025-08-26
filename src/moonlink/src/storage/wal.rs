@@ -80,7 +80,6 @@ pub enum WalEvent {
         row: MoonlinkRow,
         xact_id: Option<u32>,
         lsn: u64,
-        is_copied: bool,
     },
     Delete {
         row: MoonlinkRow,
@@ -130,16 +129,11 @@ impl WalEvent {
     pub fn new(table_event: &TableEvent) -> Self {
         match table_event {
             TableEvent::Append {
-                row,
-                xact_id,
-                lsn,
-                is_copied,
-                ..
+                row, xact_id, lsn, ..
             } => WalEvent::Append {
                 row: row.clone(),
                 xact_id: *xact_id,
                 lsn: *lsn,
-                is_copied: *is_copied,
             },
             TableEvent::Delete {
                 row,
@@ -172,16 +166,10 @@ impl WalEvent {
 
     pub fn into_table_event(self) -> TableEvent {
         match self {
-            WalEvent::Append {
+            WalEvent::Append { row, xact_id, lsn } => TableEvent::Append {
                 row,
                 xact_id,
                 lsn,
-                is_copied,
-            } => TableEvent::Append {
-                row,
-                xact_id,
-                lsn,
-                is_copied,
                 is_recovery: false,
             },
             WalEvent::Delete {

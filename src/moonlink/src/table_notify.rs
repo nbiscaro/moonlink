@@ -69,7 +69,6 @@ pub enum TableEvent {
         row: MoonlinkRow,
         xact_id: Option<u32>,
         lsn: u64,
-        is_copied: bool,
         is_recovery: bool,
     },
     /// Delete a row from the table

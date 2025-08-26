@@ -1,6 +1,6 @@
-mod batch_id_counter;
+pub mod batch_id_counter;
 mod batch_ingestion;
-mod data_batches;
+pub mod data_batches;
 pub(crate) mod delete_vector;
 mod disk_slice;
 mod iceberg_persisted_records;
@@ -77,11 +77,6 @@ use tokio::sync::{watch, RwLock};
 use tracing::info_span;
 use tracing::Instrument;
 use transaction_stream::{TransactionStreamOutput, TransactionStreamState};
-
-/// Special transaction id used for initial copy append operation.
-/// `0` is designated as `InvalidTransactionId` in the postgres implementation, so we can be sure this will never collide with a valid transaction id.
-/// [https://github.com/postgres/postgres/blob/d5b9b2d40262f57f58322ad49f8928fd4a492adb/src/include/access/transam.h#L31]
-pub(crate) const INITIAL_COPY_XACT_ID: u32 = 0;
 
 #[derive(Debug)]
 pub struct TableMetadata {

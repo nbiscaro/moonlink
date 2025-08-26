@@ -11,7 +11,6 @@
 use crate::event_sync::EventSyncSender;
 use crate::storage::mooncake_table::replay::replay_events::MooncakeTableEvent;
 use crate::storage::mooncake_table::AlterTableRequest;
-use crate::storage::mooncake_table::INITIAL_COPY_XACT_ID;
 use crate::storage::snapshot_options::IcebergSnapshotOption;
 use crate::storage::snapshot_options::MaintenanceOption;
 use crate::storage::snapshot_options::SnapshotOption;
@@ -349,14 +348,6 @@ impl TableHandler {
                     }
                     TableEvent::FinishInitialCopy { start_lsn } => {
                         debug!("finishing initial copy");
-                        let event_id = uuid::Uuid::new_v4();
-                        if let Err(e) = table.commit_transaction_stream(
-                            INITIAL_COPY_XACT_ID,
-                            start_lsn,
-                            event_id,
-                        ) {
-                            error!(error = %e, "failed to finish initial copy");
-                        }
                         // Force create the snapshot with LSN `start_lsn`
                         assert!(table.create_snapshot(SnapshotOption {
                             uuid: uuid::Uuid::new_v4(),
@@ -778,51 +769,24 @@ impl TableHandler {
         // Replication events
         // ==============================
         //
-        let is_initial_copy_event = matches!(
-            event,
-            TableEvent::Append {
-                is_copied: true,
-                ..
-            }
-        );
-
-        if table_handler_state.is_in_blocking_state() && !is_initial_copy_event {
+        if table_handler_state.special_table_state == SpecialTableState::InitialCopy {
             table_handler_state.initial_copy_buffered_events.push(event);
             return;
         }
         // Don't update the lsn if the event is not processed yet.
         table_handler_state.update_table_lsns(&event);
 
-        // In the case that this is an initial copy event we actually expect the LSN to be less than the initial persistence LSN, hence we don't discard it.
-        if table_handler_state.should_discard_event(&event)
-            && !is_initial_copy_event
-            && !event.is_recovery()
-        {
+        // Discard events that we have already processed.
+        if table_handler_state.should_discard_event(&event) && !event.is_recovery() {
             return;
         }
-        assert_eq!(
-            is_initial_copy_event,
-            table_handler_state.special_table_state == SpecialTableState::InitialCopy
-        );
 
         if !event.is_recovery() && !is_initial_copy_event {
             table.push_wal_event(&event);
         }
 
         match event {
-            TableEvent::Append {
-                is_copied,
-                row,
-                xact_id,
-                ..
-            } => {
-                if is_copied {
-                    if let Err(e) = table.append_in_stream_batch(row, INITIAL_COPY_XACT_ID) {
-                        error!(error = %e, "failed to append row");
-                    }
-                    return;
-                }
-
+            TableEvent::Append { row, xact_id, .. } => {
                 let result = match xact_id {
                     Some(xact_id) => {
                         let res = table.append_in_stream_batch(row, xact_id);

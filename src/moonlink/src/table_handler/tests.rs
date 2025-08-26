@@ -1286,7 +1286,6 @@ async fn test_initial_copy_basic() {
             row: create_row(1, "Alice", 30),
             xact_id: None,
             lsn: 5,
-            is_copied: true,
             is_recovery: false,
         })
         .await

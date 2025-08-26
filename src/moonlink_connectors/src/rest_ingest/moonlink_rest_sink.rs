@@ -189,7 +189,6 @@ impl RestSink {
                     row,
                     lsn,
                     xact_id: None,
-                    is_copied: false,
                     is_recovery: false,
                 };
 
@@ -216,7 +215,6 @@ impl RestSink {
                     row,
                     lsn,
                     xact_id: None,
-                    is_copied: false,
                     is_recovery: false,
                 };
 
@@ -318,7 +316,6 @@ mod tests {
             row: test_row.clone(),
             lsn: 1,
             xact_id: None,
-            is_copied: false,
             is_recovery: false,
         };
 
@@ -334,13 +331,11 @@ mod tests {
                 row,
                 lsn,
                 xact_id,
-                is_copied,
                 is_recovery,
             } => {
                 assert_eq!(row.values, test_row.values);
                 assert_eq!(lsn, 1);
                 assert_eq!(xact_id, None);
-                assert!(!is_copied);
                 assert!(!is_recovery);
             }
             _ => panic!("Expected Append event"),
@@ -354,7 +349,6 @@ mod tests {
                     row: test_row,
                     lsn: 2,
                     xact_id: None,
-                    is_copied: false,
                     is_recovery: false,
                 },
             )
@@ -377,7 +371,6 @@ mod tests {
                     row: MoonlinkRow::new(vec![RowValue::Int32(99)]),
                     lsn: 3,
                     xact_id: None,
-                    is_copied: false,
                     is_recovery: false,
                 },
             )
@@ -506,7 +499,6 @@ mod tests {
             row: test_row.clone(),
             lsn: 10,
             xact_id: None,
-            is_copied: false,
             is_recovery: false,
         };
         sink.send_table_event(1, insert_event).await.unwrap();

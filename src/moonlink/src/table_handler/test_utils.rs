@@ -233,7 +233,6 @@ impl TestEnvironment {
         );
         let row = create_row(id, name, age);
         let event = TableEvent::Append {
-            is_copied: false,
             row,
             lsn,
             xact_id,
