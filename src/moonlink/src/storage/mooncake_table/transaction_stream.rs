@@ -91,6 +91,10 @@ impl TransactionStreamCommit {
     pub(crate) fn get_file_indices(&self) -> Vec<FileIndex> {
         self.flushed_file_index.file_indices.clone()
     }
+    /// Attach a file index so snapshot can integrate it immediately.
+    pub(crate) fn add_file_index(&mut self, index: FileIndex) {
+        self.flushed_file_index.file_indices.push(index);
+    }
     /// Import file index into cache.
     /// Return evicted files to delete.
     pub(crate) async fn import_file_index_into_cache(
