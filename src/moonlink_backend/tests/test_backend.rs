@@ -22,6 +22,10 @@ mod tests {
     use std::time::SystemTime;
     use tempfile::TempDir;
 
+    use native_tls::TlsConnector;
+    use postgres_native_tls::MakeTlsConnector;
+    use tokio_postgres::connect;
+
     // ───────────────────────────── Tests ─────────────────────────────
 
     /// Validate `create_table` and `drop_table` across successive uses.
@@ -958,11 +962,7 @@ mod tests {
     /// Intentionally break PG connections and validate reconnect logic during operations.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
-    async fn test_reconnect_after_connection_termination() {
-        use native_tls::TlsConnector;
-        use postgres_native_tls::MakeTlsConnector;
-        use tokio_postgres::connect;
-
+    async fn test_create_table_after_connection_termination() {
         let (guard, client) = TestGuard::new(Some("reconnect_after_kill"), true).await;
         let backend = guard.backend();
 
@@ -1005,6 +1005,62 @@ mod tests {
                 DATABASE.to_string(),
                 format!("{TABLE}_reconnect"),
                 /*table_name=*/ "public.new_reconnect_after_kill".to_string(),
+                SRC_URI.to_string(),
+                guard.get_serialized_table_config(),
+                None, /* input_schema */
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_drop_after_connection_termination() {
+        let (guard, client) = TestGuard::new(Some("drop_after_kill"), true).await;
+        let backend = guard.backend();
+
+        // Ensure a row exists
+        client
+            .simple_query("INSERT INTO drop_after_kill VALUES (1,'first');")
+            .await
+            .unwrap();
+
+        // Terminate other backends for the current user to simulate connection drop
+        let connector = TlsConnector::new().unwrap();
+        let tls = MakeTlsConnector::new(connector);
+        let (killer_client, killer_conn) = connect(SRC_URI, tls).await.unwrap();
+        tokio::spawn(async move {
+            let _ = killer_conn.await;
+        });
+        killer_client
+            .simple_query(
+                "SELECT pg_terminate_backend(pid)
+                 FROM pg_stat_activity
+                 WHERE usename = current_user AND pid <> pg_backend_pid();",
+            )
+            .await
+            .unwrap();
+
+        // Drop the logical table via backend; exercises control drop and cmd drop retry/respawn
+        backend
+            .drop_table(DATABASE.to_string(), TABLE.to_string())
+            .await
+            .unwrap();
+
+        // Recreate a physical table and register it again to ensure backend remains functional
+        let (client2, _conn_handle) = crate::common::connect_to_postgres().await;
+        client2
+            .simple_query(
+                "DROP TABLE IF EXISTS drop_after_kill;
+                 CREATE TABLE drop_after_kill (id BIGINT PRIMARY KEY, name TEXT);",
+            )
+            .await
+            .unwrap();
+        backend
+            .create_table(
+                DATABASE.to_string(),
+                TABLE.to_string(),
+                /*table_name=*/ "public.drop_after_kill".to_string(),
                 SRC_URI.to_string(),
                 guard.get_serialized_table_config(),
                 None, /* input_schema */
