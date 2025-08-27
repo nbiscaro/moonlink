@@ -954,4 +954,62 @@ mod tests {
             .await;
         assert!(res.is_err());
     }
+
+    /// Intentionally break PG connections and validate reconnect logic during operations.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_reconnect_after_connection_termination() {
+        use native_tls::TlsConnector;
+        use postgres_native_tls::MakeTlsConnector;
+        use tokio_postgres::connect;
+
+        let (guard, client) = TestGuard::new(Some("reconnect_after_kill"), true).await;
+        let backend = guard.backend();
+
+        // Ensure a row exists and capture an LSN
+        client
+            .simple_query("INSERT INTO reconnect_after_kill VALUES (1,'first');")
+            .await
+            .unwrap();
+
+        // Terminate other backends for the current user to simulate connection drop
+        let connector = TlsConnector::new().unwrap();
+        let tls = MakeTlsConnector::new(connector);
+        let (killer_client, killer_conn) = connect(SRC_URI, tls).await.unwrap();
+        tokio::spawn(async move {
+            let _ = killer_conn.await;
+        });
+        killer_client
+            .simple_query(
+                "SELECT pg_terminate_backend(pid)
+                 FROM pg_stat_activity
+                 WHERE usename = current_user AND pid <> pg_backend_pid();",
+            )
+            .await
+            .unwrap();
+
+        // After killing connections, drop the existing table and create a new one using a fresh client
+        let (client2, _conn_handle) = crate::common::connect_to_postgres().await;
+        client2
+            .simple_query(
+                "DROP TABLE IF EXISTS reconnect_after_kill;
+                 DROP TABLE IF EXISTS new_reconnect_after_kill;
+                 CREATE TABLE new_reconnect_after_kill (id BIGINT PRIMARY KEY, name TEXT);",
+            )
+            .await
+            .unwrap();
+
+        // Attempt to register the new table with the backend; this triggers ALTER TABLE REPLICA IDENTITY FULL
+        backend
+            .create_table(
+                DATABASE.to_string(),
+                format!("{TABLE}_reconnect"),
+                /*table_name=*/ "public.new_reconnect_after_kill".to_string(),
+                SRC_URI.to_string(),
+                guard.get_serialized_table_config(),
+                None, /* input_schema */
+            )
+            .await
+            .unwrap();
+    }
 }
