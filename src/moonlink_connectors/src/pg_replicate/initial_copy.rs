@@ -31,6 +31,7 @@ pub async fn copy_table_stream<S>(
     mut stream: S,
     event_sender: &Sender<TableEvent>,
     start_lsn: u64,
+    config: Option<InitialCopyWriterConfig>,
 ) -> Result<CopyProgress>
 where
     S: Stream<
@@ -52,7 +53,7 @@ where
     // Create batch channel for RecordBatches
     let (batch_tx, batch_rx) = create_batch_channel(16); // Channel capacity of 16
 
-    let config = InitialCopyWriterConfig::default();
+    let config = config.unwrap_or_default();
 
     // Create Arrow batch builder
     let mut batch_builder = ArrowBatchBuilder::new(arrow_schema.clone(), config.max_rows_per_batch);
@@ -193,7 +194,7 @@ mod tests {
         let schema = make_test_schema("test");
         let start_lsn = 1000u64;
 
-        let progress = copy_table_stream(schema, Box::pin(stream), &tx, start_lsn)
+        let progress = copy_table_stream(schema, Box::pin(stream), &tx, start_lsn, None)
             .await
             .expect("copy failed");
 
@@ -241,7 +242,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<TableEvent>(8);
         let schema = make_test_schema("empty");
 
-        let progress = copy_table_stream(schema, Box::pin(stream), &tx, 0u64)
+        let progress = copy_table_stream(schema, Box::pin(stream), &tx, 0u64, None)
             .await
             .expect("copy failed");
         assert_eq!(progress.rows_copied, 0);
@@ -288,7 +289,7 @@ mod tests {
         let schema = make_test_schema("rotate");
         let start_lsn = 42u64;
 
-        let _ = copy_table_stream(schema, Box::pin(stream), &tx, start_lsn)
+        let _ = copy_table_stream(schema, Box::pin(stream), &tx, start_lsn, Some(config))
             .await
             .expect("copy failed");
 
@@ -339,7 +340,7 @@ mod tests {
         let (tx, _) = mpsc::channel::<TableEvent>(1);
         let schema = make_test_schema("broken");
 
-        let err = copy_table_stream(schema, Box::pin(stream), &tx, 0u64)
+        let err = copy_table_stream(schema, Box::pin(stream), &tx, 0u64, None)
             .await
             .expect_err("expected failure");
 

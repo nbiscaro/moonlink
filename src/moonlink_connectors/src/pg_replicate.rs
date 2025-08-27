@@ -254,8 +254,14 @@ impl PostgresConnection {
                 .get_table_copy_stream(&schema.table_name, &schema.column_schemas)
                 .await
                 .expect("failed to get table copy stream");
-            let res =
-                copy_table_stream(schema.clone(), stream, &event_sender, start_lsn.into()).await;
+            let res = copy_table_stream(
+                schema.clone(),
+                stream,
+                &event_sender,
+                start_lsn.into(),
+                None,
+            )
+            .await;
 
             if let Err(e) = res {
                 error!(error = ?e, table_id = src_table_id, "failed to copy table");
