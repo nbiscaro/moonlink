@@ -59,7 +59,6 @@ pub enum PostgresReplicationCommand {
 
 pub struct PostgresConnection {
     pub uri: String,
-    pub postgres_client: Client,
     pub source: Arc<PostgresSource>,
     pub slot_name: String,
     pub cmd_tx: mpsc::Sender<PostgresReplicationCommand>,
@@ -120,7 +119,6 @@ impl PostgresConnection {
 
         Ok(Self {
             uri,
-            postgres_client,
             source: Arc::new(postgres_source),
             slot_name,
             cmd_tx,
@@ -130,12 +128,47 @@ impl PostgresConnection {
         })
     }
 
+    /// Create a new ephemeral control client for running simple queries.
+    async fn new_control_client(&self) -> Result<(Client, JoinHandle<()>)> {
+        let tls = build_tls_connector().map_err(PostgresSourceError::from)?;
+        let (client, connection) = connect(&self.uri, tls)
+            .await
+            .map_err(PostgresSourceError::from)?;
+        let handle = tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                warn!("connection error: {}", e);
+            }
+        });
+        Ok((client, handle))
+    }
+
+    /// Run a simple query using a fresh control client.
+    async fn run_control_simple_query(&self, query: &str) -> Result<()> {
+        let (client, handle) = self.new_control_client().await?;
+        let result = client.simple_query(query).await;
+        // Drop the client and wait for the driver to finish
+        drop(client);
+        let _ = handle.await;
+        result?;
+        Ok(())
+    }
+
+    /// Run multiple simple queries using a single fresh control client.
+    async fn run_control_simple_queries(&self, queries: &[&str]) -> Result<()> {
+        let (client, handle) = self.new_control_client().await?;
+        for q in queries {
+            client.simple_query(q).await?;
+        }
+        // Drop the client and wait for the driver to finish
+        drop(client);
+        let _ = handle.await;
+        Ok(())
+    }
+
     /// Include full row in cdc stream (not just primary keys).
     pub async fn alter_table_replica_identity(&self, table_name: &str) -> Result<()> {
-        self.postgres_client
-            .simple_query(&format!("ALTER TABLE {table_name} REPLICA IDENTITY FULL;"))
-            .await?;
-        Ok(())
+        let query = format!("ALTER TABLE {table_name} REPLICA IDENTITY FULL;");
+        self.run_control_simple_query(&query).await
     }
 
     #[must_use]
@@ -257,16 +290,10 @@ impl PostgresConnection {
             "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = '{}';",
             self.slot_name
         );
-        let _ = self.postgres_client.simple_query(&terminate_query).await;
-
         // Then drop the replication slot
         let drop_query = format!("SELECT pg_drop_replication_slot('{}');", self.slot_name);
-        self.postgres_client
-            .simple_query(&drop_query)
+        self.run_control_simple_queries(&[&terminate_query, &drop_query])
             .await
-            .map_err(PostgresSourceError::from)?;
-
-        Ok(())
     }
 
     pub async fn remove_table_from_publication(&mut self, table_name: &str) -> Result<()> {
@@ -327,24 +354,26 @@ impl PostgresConnection {
         // Clean up any completed retry handles first
         self.cleanup_completed_retries();
 
-        self.postgres_client
-            .simple_query(drop_query)
-            .await
-            .or_else(|e| match e.code() {
-                Some(&SqlState::LOCK_NOT_AVAILABLE) => {
-                    warn!("lock not available, retrying");
-                    // Store the handle so we can track its completion
-                    let handle = Self::retry_drop(&self.uri, drop_query);
-                    self.retry_handles.push(handle);
-                    Ok(vec![])
+        let (client, _handle) = self.new_control_client().await?;
+        match client.simple_query(drop_query).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                match e.code() {
+                    Some(&SqlState::LOCK_NOT_AVAILABLE) => {
+                        warn!("lock not available, retrying");
+                        // Store the handle so we can track its completion
+                        let handle = Self::retry_drop(&self.uri, drop_query);
+                        self.retry_handles.push(handle);
+                        Ok(())
+                    }
+                    Some(&SqlState::UNDEFINED_TABLE) => {
+                        warn!("table already dropped, skipping");
+                        Ok(())
+                    }
+                    _ => Err::<(), _>(PostgresSourceError::from(e).into()),
                 }
-                Some(&SqlState::UNDEFINED_TABLE) => {
-                    warn!("table already dropped, skipping");
-                    Ok(vec![])
-                }
-                _ => Err(PostgresSourceError::from(e)),
-            })?;
-        Ok(())
+            }
+        }
     }
 
     /// Drop publication
