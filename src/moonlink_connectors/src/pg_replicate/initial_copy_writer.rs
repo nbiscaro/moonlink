@@ -180,3 +180,200 @@ impl ParquetFileWriter {
 }
 
 // TODO: Add unit tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow_array::{ArrayRef, Int32Array};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use crate::pg_replicate::conversions::Cell;
+
+    fn int32_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, true)]))
+    }
+
+    fn make_batch(values: &[i32]) -> RecordBatch {
+        let arr = Int32Array::from(values.to_vec());
+        RecordBatch::try_new(int32_schema(), vec![Arc::new(arr) as ArrayRef]).unwrap()
+    }
+
+    #[test]
+    fn config_defaults_align_with_defaults() {
+        let cfg = InitialCopyWriterConfig::default();
+        assert_eq!(
+            cfg.target_file_size_bytes,
+            DiskSliceWriterConfig::default_disk_slice_parquet_file_size()
+        );
+        assert_eq!(
+            cfg.max_rows_per_batch,
+            MooncakeTableConfig::default_batch_size()
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_channel_send_and_recv() {
+        let (tx, mut rx) = create_batch_channel(2);
+        let b = make_batch(&[1, 2, 3]);
+        tx.send(b.clone()).await.unwrap();
+        let got = rx.recv().await.unwrap();
+        assert_eq!(got.num_rows(), 3);
+        assert_eq!(got.num_columns(), 1);
+
+        // When sender is dropped, receiver should return None
+        drop(tx);
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn batch_sender_errors_when_receiver_closed() {
+        let (tx, rx) = create_batch_channel(1);
+        drop(rx); // close receiver
+        let res = tx.send(make_batch(&[1])).await;
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn arrow_batch_builder_rotation_on_capacity() {
+        // max_rows = 2 -> third append should finalize first batch
+        let schema = int32_schema();
+        let mut builder = ArrowBatchBuilder::new(schema, 2);
+
+        let row1 = TableRow {
+            values: vec![Cell::I32(10)],
+        };
+        let row2 = TableRow {
+            values: vec![Cell::I32(20)],
+        };
+        let row3 = TableRow {
+            values: vec![Cell::I32(30)],
+        };
+
+        assert!(builder.append_table_row(row1).unwrap().is_none());
+        assert!(builder.append_table_row(row2).unwrap().is_none());
+
+        // Third append finalizes previous full batch (rows: 10, 20)
+        let maybe_batch = builder.append_table_row(row3).unwrap();
+        assert!(maybe_batch.is_some());
+        let batch = maybe_batch.unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.num_columns(), 1);
+        let column = batch.column(0);
+        let col = column.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(col.value(0), 10);
+        assert_eq!(col.value(1), 20);
+    }
+
+    #[test]
+    fn arrow_batch_builder_finish_returns_remaining_and_then_none() {
+        let schema = int32_schema();
+        let mut builder = ArrowBatchBuilder::new(schema, 4);
+
+        // Append fewer rows than capacity
+        builder
+            .append_table_row(TableRow {
+                values: vec![Cell::I32(1)],
+            })
+            .unwrap();
+        builder
+            .append_table_row(TableRow {
+                values: vec![Cell::I32(2)],
+            })
+            .unwrap();
+
+        // Finish should flush the 2 rows
+        let flushed = builder.finish().unwrap().unwrap();
+        assert_eq!(flushed.num_rows(), 2);
+
+        // Second finish without appends should return None
+        assert!(builder.finish().unwrap().is_none());
+    }
+
+    #[test]
+    fn arrow_batch_builder_finish_empty_returns_none() {
+        let schema = int32_schema();
+        let mut builder = ArrowBatchBuilder::new(schema, 2);
+        assert!(builder.finish().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn parquet_writer_writes_and_rotates_per_batch() {
+        // Force rotation after every write by setting target size to 0
+        let output_dir =
+            std::env::temp_dir().join(format!("ml_icw_rotate_{}", uuid::Uuid::now_v7()));
+        let schema = int32_schema();
+        let config = InitialCopyWriterConfig {
+            target_file_size_bytes: 0,
+            max_rows_per_batch: 1024,
+        };
+
+        let (tx, rx) = create_batch_channel(8);
+        let writer = ParquetFileWriter::new(output_dir.clone(), schema.clone(), config);
+        let handle = tokio::spawn(async move { writer.write_from_channel(rx).await });
+
+        // Send three small batches
+        tx.send(make_batch(&[1])).await.unwrap();
+        tx.send(make_batch(&[2, 3])).await.unwrap();
+        tx.send(make_batch(&[4, 5, 6])).await.unwrap();
+        drop(tx); // close to let writer finish
+
+        let files = handle.await.unwrap().unwrap();
+        assert_eq!(files.len(), 3);
+        for f in files.iter() {
+            assert!(Path::new(f).exists());
+            assert!(f.contains("ic-"));
+            assert!(f.ends_with(".parquet"));
+        }
+
+        // Directory should exist
+        assert!(output_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn parquet_writer_ignores_empty_batches() {
+        let output_dir =
+            std::env::temp_dir().join(format!("ml_icw_empty_{}", uuid::Uuid::now_v7()));
+        let schema = int32_schema();
+        let config = InitialCopyWriterConfig::default();
+
+        let (tx, rx) = create_batch_channel(8);
+        let writer = ParquetFileWriter::new(output_dir.clone(), schema.clone(), config);
+        let handle = tokio::spawn(async move { writer.write_from_channel(rx).await });
+
+        // Send an empty batch (0 rows) and a non-empty one
+        let empty = RecordBatch::new_empty(schema.clone());
+        tx.send(empty).await.unwrap();
+        tx.send(make_batch(&[42])).await.unwrap();
+        drop(tx);
+
+        let files = handle.await.unwrap().unwrap();
+        // Only the non-empty batch should result in a file
+        assert_eq!(files.len(), 1);
+        assert!(Path::new(&files[0]).exists());
+    }
+
+    #[tokio::test]
+    async fn parquet_writer_finalizes_on_channel_close() {
+        // Large target size so no rotation happens during writes; file is finalized at the end
+        let output_dir =
+            std::env::temp_dir().join(format!("ml_icw_finalize_{}", uuid::Uuid::now_v7()));
+        let schema = int32_schema();
+        let config = InitialCopyWriterConfig {
+            target_file_size_bytes: usize::MAX,
+            max_rows_per_batch: 1024,
+        };
+
+        let (tx, rx) = create_batch_channel(4);
+        let writer = ParquetFileWriter::new(output_dir.clone(), schema.clone(), config);
+        let handle = tokio::spawn(async move { writer.write_from_channel(rx).await });
+
+        tx.send(make_batch(&[7, 8, 9])).await.unwrap();
+        drop(tx);
+
+        let files = handle.await.unwrap().unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(Path::new(&files[0]).exists());
+    }
+}
