@@ -244,6 +244,15 @@ impl PostgresConnection {
         }
     }
 
+    /// Ensure the command channel exists (recreate if the receiver was taken by a finished task).
+    fn ensure_cmd_channel(&mut self) {
+        if self.cmd_rx.is_none() {
+            let (tx, rx) = mpsc::channel(8);
+            self.cmd_tx = tx;
+            self.cmd_rx = Some(rx);
+        }
+    }
+
     pub fn retry_drop(uri: &str, drop_query: &str) -> JoinHandle<Result<()>> {
         let uri = uri.to_string();
         let drop_query = drop_query.to_string();
@@ -309,7 +318,7 @@ impl PostgresConnection {
 
     /// Add table to PostgreSQL replication
     pub async fn add_table_to_replication(
-        &self,
+        &mut self,
         src_table_id: SrcTableId,
         schema: TableSchema,
         event_sender: mpsc::Sender<TableEvent>,
@@ -325,14 +334,25 @@ impl PostgresConnection {
             flush_lsn_rx,
             wal_flush_lsn_rx,
         };
-        self.cmd_tx.send(cmd).await?;
+        // Try sending; if the receiver is gone, recreate channel, respawn task, and retry.
+        if let Err(e) = self.cmd_tx.send(cmd).await {
+            let cmd = e.0;
+            self.ensure_cmd_channel();
+            let _ = self.spawn_replication_task().await;
+            self.cmd_tx.send(cmd).await?;
+        }
         Ok(())
     }
 
     /// Drop table from PostgreSQL replication
-    pub async fn drop_table_from_replication(&self, src_table_id: SrcTableId) -> Result<()> {
+    pub async fn drop_table_from_replication(&mut self, src_table_id: SrcTableId) -> Result<()> {
         let cmd = PostgresReplicationCommand::DropTable { src_table_id };
-        self.cmd_tx.send(cmd).await?;
+        if let Err(e) = self.cmd_tx.send(cmd).await {
+            let cmd = e.0;
+            self.ensure_cmd_channel();
+            let _ = self.spawn_replication_task().await;
+            self.cmd_tx.send(cmd).await?;
+        }
         Ok(())
     }
 
@@ -385,7 +405,7 @@ impl PostgresConnection {
 
     /// Add table to PostgreSQL replication
     pub async fn add_table<T: std::fmt::Display>(
-        &self,
+        &mut self,
         table_name: &str,
         mooncake_table_id: &T,
         moonlink_table_config: MoonlinkTableConfig,
@@ -529,7 +549,12 @@ impl PostgresConnection {
     /// Spawn replication task
     pub async fn spawn_replication_task(&mut self) -> JoinHandle<Result<()>> {
         let sink = Sink::new(self.replication_state.clone());
-        let receiver = self.cmd_rx.take().unwrap();
+        // Recreate the command channel if it has been taken by a previous task.
+        self.ensure_cmd_channel();
+        let receiver = self
+            .cmd_rx
+            .take()
+            .expect("cmd_rx should be set before spawning");
 
         let uri = self.uri.clone();
         let cfg = self.source.get_cdc_stream_config().unwrap();

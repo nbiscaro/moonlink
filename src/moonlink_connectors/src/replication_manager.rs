@@ -205,6 +205,8 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationManager<T> {
         assert!(self.connections.contains_key(src_uri));
 
         let connection = self.connections.get_mut(src_uri).unwrap();
+        // If the background task has exited (e.g., due to PG connection drop), allow restart.
+        connection.refresh_replication_status();
         if !connection.replication_started() {
             connection.start_replication().await?;
         }

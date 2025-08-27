@@ -110,6 +110,18 @@ impl<T: Clone + Eq + Hash + std::fmt::Display> ReplicationConnection<T> {
         self.replication_started
     }
 
+    /// Refresh internal replication status by checking if the background task has finished.
+    /// If finished, clear the handle and mark replication as not started so callers can restart it.
+    pub fn refresh_replication_status(&mut self) {
+        if let Some(handle) = &self.handle {
+            if handle.is_finished() {
+                self.handle = None;
+                self.replication_started = false;
+                debug!("replication task finished; marking as not started");
+            }
+        }
+    }
+
     /// Get the REST request sender for submitting REST API requests
     pub fn get_rest_request_sender(&self) -> mpsc::Sender<EventRequest> {
         match &self.source {

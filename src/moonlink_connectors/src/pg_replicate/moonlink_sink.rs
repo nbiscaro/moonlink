@@ -105,8 +105,8 @@ impl Sink {
         self.relation_cache.insert(src_table_id, columns);
     }
     pub fn drop_table(&mut self, src_table_id: SrcTableId) {
-        self.event_senders.remove(&src_table_id).unwrap();
-        self.commit_lsn_txs.remove(&src_table_id).unwrap();
+        self.event_senders.remove(&src_table_id);
+        self.commit_lsn_txs.remove(&src_table_id);
         if let Some((cached_id, _)) = &self.cached_event_sender {
             if *cached_id == src_table_id {
                 self.cached_event_sender = None;
