@@ -2396,7 +2396,6 @@ async fn test_alter_table() {
     .await;
 
     env.send_event(TableEvent::Append {
-        is_copied: false,
         row: MoonlinkRow::new(vec![RowValue::Int32(2), RowValue::Int32(30)]),
         lsn: 1,
         xact_id: None,

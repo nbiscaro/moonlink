@@ -96,6 +96,30 @@ pub async fn test_table(
     .unwrap()
 }
 
+pub async fn test_append_only_table(context: &TestContext, table_name: &str) -> MooncakeTable {
+    // Append-only table requires IdentityProp::None and append_only=true
+    let iceberg_table_config = test_iceberg_table_config(context, table_name);
+    let mut table_config = test_mooncake_table_config(context);
+    table_config.batch_size = 2;
+    table_config.append_only = true;
+    let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path());
+    let wal_manager = WalManager::new(&wal_config);
+    MooncakeTable::new(
+        (*create_test_arrow_schema()).clone(),
+        table_name.to_string(),
+        1,
+        context.path(),
+        IdentityProp::None,
+        iceberg_table_config.clone(),
+        table_config,
+        wal_manager,
+        create_test_object_storage_cache(&context.temp_dir),
+        create_test_filesystem_accessor(&iceberg_table_config),
+    )
+    .await
+    .unwrap()
+}
+
 pub fn read_ids_from_parquet(file_path: &String) -> Vec<Option<i32>> {
     let file = File::open(file_path).unwrap();
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
