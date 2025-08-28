@@ -31,6 +31,7 @@ pub const SRC_URI: &str =
     "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=verify-full";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub enum TestGuardMode {
     /// Default test mode, which initiates all resource at construction and clean up at destruction.
     Normal,
@@ -45,6 +46,7 @@ pub struct TestGuard {
 }
 
 impl TestGuard {
+    #[allow(dead_code)]
     pub async fn new(table_name: Option<&'static str>, has_primary_key: bool) -> (Self, Client) {
         let (tmp, backend, client) = setup_backend(table_name, has_primary_key).await;
         let guard = Self {
@@ -59,6 +61,7 @@ impl TestGuard {
         &self.backend
     }
 
+    #[allow(dead_code)]
     pub fn get_serialized_table_config(&self) -> String {
         let root_directory = self
             .tmp
