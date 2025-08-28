@@ -5,6 +5,9 @@ mod control_plane_retry_tests {
     use super::common::{connect_to_postgres, SRC_URI};
     use moonlink_connectors::pg_replicate::PostgresConnection;
     use serial_test::serial;
+    use std::time::Instant;
+    use tokio::task::yield_now;
+    use tokio::time::{sleep, Duration};
     use tokio_postgres::SimpleQueryMessage;
 
     // Helper: fetch backend pid of the control-plane client via SELECT pg_backend_pid()
@@ -159,5 +162,41 @@ mod control_plane_retry_tests {
         assert!(rows
             .iter()
             .all(|m| !matches!(m, SimpleQueryMessage::Row(_))));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[serial]
+    async fn test_run_control_query_backoff_virtual_time() {
+        // Build a control-plane connection
+        let mut conn = PostgresConnection::new(SRC_URI.to_string()).await.unwrap();
+        let _ = conn.run_control_query("SELECT 1;").await.unwrap();
+
+        // Induce transport error for the first attempt
+        let pid = get_control_pid(&mut conn).await;
+        let (admin, _h) = connect_to_postgres().await;
+        let _ = admin
+            .simple_query(&format!("SELECT pg_terminate_backend({pid});"))
+            .await
+            .unwrap();
+
+        // Spawn the retried query; it should block on the first backoff sleep (300ms)
+        let handle = tokio::spawn(async move { conn.run_control_query("SELECT 1;").await });
+
+        // Give the task a chance to start and hit the sleep
+        yield_now().await;
+        assert!(!handle.is_finished(), "should be waiting on backoff sleep");
+
+        // Advance less than backoff duration; should still be pending
+        sleep(Duration::from_millis(299)).await; // with start_paused, this advances virtual time
+        yield_now().await;
+        assert!(
+            !handle.is_finished(),
+            "should still be waiting before 300ms"
+        );
+
+        // Cross the backoff boundary; retry should proceed and complete
+        sleep(Duration::from_millis(1)).await;
+        let res = handle.await.unwrap();
+        assert!(res.is_ok(), "expected query to succeed after backoff");
     }
 }
