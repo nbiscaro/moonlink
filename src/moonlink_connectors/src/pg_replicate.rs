@@ -154,23 +154,60 @@ impl PostgresConnection {
         Ok(())
     }
 
-    /// Centralized control-plane query executor. Retries once on connection errors by reconnecting
+    /// Centralized control-plane query executor. Retries with backoff on connection errors.
     pub async fn run_control_query(&mut self, sql: &str) -> Result<Vec<SimpleQueryMessage>> {
-        match self.postgres_client.simple_query(sql).await {
-            Ok(messages) => Ok(messages),
-            Err(e) => {
-                warn!(error = %e, "control query failed, attempting single reconnect+retry");
-                // Attempt to reconnect control-plane client once
-                if let Err(reconn_err) = self.reconnect_control_client().await {
-                    return Err(reconn_err);
+        // Simple linear backoff for transport errors only.
+        // Total attempts = 1 initial + MAX_RETRIES.
+        const MAX_RETRIES: usize = 3;
+        const BASE_DELAY_MS: u64 = 300;
+
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                // Backoff before retrying and reconnecting the control-plane client.
+                let delay_ms = BASE_DELAY_MS * (attempt as u64);
+                sleep(Duration::from_millis(delay_ms)).await;
+                if let Err(err) = self.reconnect_control_client().await {
+                    // If reconnect fails on the final attempt, bubble up.
+                    if attempt == MAX_RETRIES {
+                        return Err(err);
+                    }
+                    // Otherwise, continue to next retry iteration.
+                    continue;
                 }
-                self.postgres_client
-                    .simple_query(sql)
-                    .await
-                    .map_err(PostgresSourceError::from)
-                    .map_err(Into::into)
+            }
+
+            match self.postgres_client.simple_query(sql).await {
+                Ok(messages) => return Ok(messages),
+                Err(e) => {
+                    // Retry for transport-like errors: no SQLSTATE, connection-exception class (08xxx),
+                    // or common admin/crash shutdown and transient cannot-connect-now.
+                    let retryable = match e.code() {
+                        None => true,
+                        Some(code) => {
+                            let c = code.code();
+                            code == &SqlState::ADMIN_SHUTDOWN
+                                || code == &SqlState::CRASH_SHUTDOWN
+                                || code == &SqlState::CANNOT_CONNECT_NOW
+                                || c.starts_with("08")
+                        }
+                    };
+
+                    if retryable {
+                        if attempt == MAX_RETRIES {
+                            return Err(PostgresSourceError::from(e).into());
+                        }
+                        // Try again after reconnect/backoff.
+                        continue;
+                    } else {
+                        // SQLSTATE present and not retryable: fail fast.
+                        return Err(PostgresSourceError::from(e).into());
+                    }
+                }
             }
         }
+
+        // Should not reach here.
+        Err(PostgresSourceError::Io(Error::new(ErrorKind::Other, "unexpected retry exit")).into())
     }
 
     /// Include full row in cdc stream (not just primary keys).
