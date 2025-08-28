@@ -38,6 +38,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::types::PgLsn;
+use tokio_postgres::SimpleQueryMessage;
 use tokio_postgres::{connect, Client, Config};
 use tokio_postgres::{Connection, Socket};
 use tracing::{debug, error, info_span, warn, Instrument};
@@ -130,11 +131,52 @@ impl PostgresConnection {
         })
     }
 
+    /// Reconnect the control-plane client and reapply session settings
+    async fn reconnect_control_client(&mut self) -> Result<()> {
+        let tls = build_tls_connector().map_err(PostgresSourceError::from)?;
+        let (client, connection) = connect(&self.uri, tls)
+            .await
+            .map_err(PostgresSourceError::from)?;
+        tokio::spawn(
+            async move {
+                if let Err(e) = connection.await {
+                    warn!("connection error: {}", e);
+                }
+            }
+            .instrument(info_span!("postgres_connection_monitor")),
+        );
+        // Reapply desired session settings
+        client
+            .simple_query("SET lock_timeout = '100ms';")
+            .await
+            .map_err(PostgresSourceError::from)?;
+        self.postgres_client = client;
+        Ok(())
+    }
+
+    /// Centralized control-plane query executor. Retries once on connection errors by reconnecting
+    pub async fn run_control_query(&mut self, sql: &str) -> Result<Vec<SimpleQueryMessage>> {
+        match self.postgres_client.simple_query(sql).await {
+            Ok(messages) => Ok(messages),
+            Err(e) => {
+                warn!(error = %e, "control query failed, attempting single reconnect+retry");
+                // Attempt to reconnect control-plane client once
+                if let Err(reconn_err) = self.reconnect_control_client().await {
+                    return Err(reconn_err);
+                }
+                self.postgres_client
+                    .simple_query(sql)
+                    .await
+                    .map_err(PostgresSourceError::from)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
     /// Include full row in cdc stream (not just primary keys).
-    pub async fn alter_table_replica_identity(&self, table_name: &str) -> Result<()> {
-        self.postgres_client
-            .simple_query(&format!("ALTER TABLE {table_name} REPLICA IDENTITY FULL;"))
-            .await?;
+    pub async fn alter_table_replica_identity(&mut self, table_name: &str) -> Result<()> {
+        let sql = format!("ALTER TABLE {table_name} REPLICA IDENTITY FULL;");
+        let _ = self.run_control_query(&sql).await?;
         Ok(())
     }
 
@@ -251,20 +293,17 @@ impl PostgresConnection {
         })
     }
 
-    pub async fn drop_replication_slot(&self) -> Result<()> {
+    pub async fn drop_replication_slot(&mut self) -> Result<()> {
         // First, terminate any active connections using this slot
         let terminate_query = format!(
             "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = '{}';",
             self.slot_name
         );
-        let _ = self.postgres_client.simple_query(&terminate_query).await;
+        let _ = self.run_control_query(&terminate_query).await;
 
         // Then drop the replication slot
         let drop_query = format!("SELECT pg_drop_replication_slot('{}');", self.slot_name);
-        self.postgres_client
-            .simple_query(&drop_query)
-            .await
-            .map_err(PostgresSourceError::from)?;
+        self.run_control_query(&drop_query).await?;
 
         Ok(())
     }
@@ -332,7 +371,7 @@ impl PostgresConnection {
             .await
             .or_else(|e| match e.code() {
                 Some(&SqlState::LOCK_NOT_AVAILABLE) => {
-                    warn!("lock not available, retrying");
+                    warn!("lock not available, retrying in background");
                     // Store the handle so we can track its completion
                     let handle = Self::retry_drop(&self.uri, drop_query);
                     self.retry_handles.push(handle);
@@ -340,6 +379,13 @@ impl PostgresConnection {
                 }
                 Some(&SqlState::UNDEFINED_TABLE) => {
                     warn!("table already dropped, skipping");
+                    Ok(vec![])
+                }
+                None => {
+                    // Likely transport/connection error. Retry in background.
+                    warn!("transport error on drop; retrying in background");
+                    let handle = Self::retry_drop(&self.uri, drop_query);
+                    self.retry_handles.push(handle);
                     Ok(vec![])
                 }
                 _ => Err(PostgresSourceError::from(e)),
@@ -356,7 +402,7 @@ impl PostgresConnection {
 
     /// Add table to PostgreSQL replication
     pub async fn add_table<T: std::fmt::Display>(
-        &self,
+        &mut self,
         table_name: &str,
         mooncake_table_id: &T,
         moonlink_table_config: &mut MoonlinkTableConfig,
