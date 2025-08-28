@@ -43,6 +43,19 @@ use tokio_postgres::{connect, Client, Config};
 use tokio_postgres::{Connection, Socket};
 use tracing::{debug, error, info_span, warn, Instrument};
 
+fn is_transport_like(sqlstate: Option<&SqlState>) -> bool {
+    match sqlstate {
+        None => true,
+        Some(code) => {
+            let c = code.code();
+            code == &SqlState::ADMIN_SHUTDOWN
+                || code == &SqlState::CRASH_SHUTDOWN
+                || code == &SqlState::CANNOT_CONNECT_NOW
+                || c.starts_with("08")
+        }
+    }
+}
+
 pub enum PostgresReplicationCommand {
     AddTable {
         src_table_id: SrcTableId,
@@ -179,19 +192,7 @@ impl PostgresConnection {
             match self.postgres_client.simple_query(sql).await {
                 Ok(messages) => return Ok(messages),
                 Err(e) => {
-                    // Retry for transport-like errors: no SQLSTATE, connection-exception class (08xxx),
-                    // or common admin/crash shutdown and transient cannot-connect-now.
-                    let retryable = match e.code() {
-                        None => true,
-                        Some(code) => {
-                            let c = code.code();
-                            code == &SqlState::ADMIN_SHUTDOWN
-                                || code == &SqlState::CRASH_SHUTDOWN
-                                || code == &SqlState::CANNOT_CONNECT_NOW
-                                || c.starts_with("08")
-                        }
-                    };
-
+                    let retryable = is_transport_like(e.code());
                     if retryable {
                         if attempt == MAX_RETRIES {
                             return Err(PostgresSourceError::from(e).into());
@@ -418,9 +419,9 @@ impl PostgresConnection {
                     warn!("table already dropped, skipping");
                     Ok(vec![])
                 }
-                None => {
-                    // Likely transport/connection error. Retry in background.
-                    warn!("transport error on drop; retrying in background");
+                opt if is_transport_like(opt) => {
+                    // Treat connection-exception and shutdowns as transport-like: retry in background
+                    warn!("transport-like sqlstate on drop; retrying in background");
                     let handle = Self::retry_drop(&self.uri, drop_query);
                     self.retry_handles.push(handle);
                     Ok(vec![])
