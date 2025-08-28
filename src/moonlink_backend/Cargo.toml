@@ -46,5 +46,5 @@ rstest = "0.26"
 serial_test = { workspace = true }
 tempfile = { workspace = true }
 thrift = "0.17"
-tokio-postgres = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+tokio-postgres = { workspace = true }

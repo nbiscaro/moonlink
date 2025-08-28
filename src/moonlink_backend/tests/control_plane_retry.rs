@@ -5,7 +5,7 @@ mod control_plane_retry_tests {
     use super::common::{connect_to_postgres, SRC_URI};
     use moonlink_connectors::pg_replicate::PostgresConnection;
     use serial_test::serial;
-    use std::time::Instant;
+
     use tokio::task::yield_now;
     use tokio::time::{sleep, Duration};
     use tokio_postgres::SimpleQueryMessage;
