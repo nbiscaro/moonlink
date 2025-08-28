@@ -112,4 +112,52 @@ mod control_plane_retry_tests {
         let err = conn.run_control_query("THIS IS NOT SQL").await.err();
         assert!(err.is_some());
     }
+
+    /// Test: attempt_drop_else_retry transport error path schedules background retry and completes
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_attempt_drop_transport_error_background_retry() {
+        // Prepare table and publication membership
+        let (admin, _h) = connect_to_postgres().await;
+        let _ = admin
+            .simple_query(
+                "DROP TABLE IF EXISTS retry_drop;
+                 CREATE TABLE retry_drop (id BIGINT PRIMARY KEY, name TEXT);
+                 DROP PUBLICATION IF EXISTS moonlink_pub;
+                 CREATE PUBLICATION moonlink_pub WITH (publish_via_partition_root = true);
+                 ALTER PUBLICATION moonlink_pub ADD TABLE public.retry_drop;",
+            )
+            .await
+            .unwrap();
+
+        // Create a PostgresConnection (will set lock_timeout too)
+        let mut conn = PostgresConnection::new(SRC_URI.to_string()).await.unwrap();
+
+        // Kill control-plane backend to force a transport error on the first simple_query
+        let pid = get_control_pid(&mut conn).await;
+        let (killer, _hk) = connect_to_postgres().await;
+        let _ = killer
+            .simple_query(&format!("SELECT pg_terminate_backend({pid});"))
+            .await
+            .unwrap();
+
+        // Call remove_table_from_publication: should return quickly and schedule background retry
+        conn.remove_table_from_publication("public.retry_drop")
+            .await
+            .unwrap();
+
+        // Wait for background retries to complete, then assert membership removed
+        conn.wait_for_pending_retries().await;
+
+        let rows = admin
+            .simple_query(
+                "SELECT 1 FROM pg_publication_tables WHERE pubname = 'moonlink_pub' AND schemaname = 'public' AND tablename = 'retry_drop';",
+            )
+            .await
+            .unwrap();
+        // Expect no rows (table removed from publication)
+        assert!(rows
+            .iter()
+            .all(|m| !matches!(m, SimpleQueryMessage::Row(_))));
+    }
 }
