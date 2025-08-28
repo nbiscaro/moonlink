@@ -597,7 +597,6 @@ pub async fn run_event_loop(
                     break;
                 }
 
-                let mut ok_events: Vec<CdcEvent> = Vec::new();
                 for event in batch.drain(..n) {
                     match event {
                         Err(CdcStreamError::CdcEventConversion(CdcEventConversionError::MissingSchema(_))) => {
@@ -613,22 +612,13 @@ pub async fn run_event_loop(
                             break;
                         }
                         Ok(event) => {
-                            ok_events.push(event);
+                            if let Some(SchemaChangeRequest(src_table_id)) = sink.process_cdc_event(event).await.unwrap() {
+                                let table_schema = postgres_source.fetch_table_schema(Some(src_table_id), None, None).await?;
+                                sink.alter_table(src_table_id, &table_schema).await;
+                                stream.as_mut().update_table_schema(table_schema);
+                            }
                         }
                     }
-                }
-
-                let mut schema_reqs: Vec<SchemaChangeRequest> = Vec::new();
-                for event in ok_events {
-                    if let Some(req) = sink.process_cdc_event(event).await.unwrap() {
-                        schema_reqs.push(req);
-                    }
-                }
-                // Apply schema changes once per table (deduped)
-                for src_table_id in schema_reqs.into_iter().map(|SchemaChangeRequest(id)| id).collect::<HashSet<_>>() {
-                    let table_schema = postgres_source.fetch_table_schema(Some(src_table_id), None, None).await?;
-                    sink.alter_table(src_table_id, &table_schema).await;
-                    stream.as_mut().update_table_schema(table_schema);
                 }
             },
             _ = &mut connection => {
