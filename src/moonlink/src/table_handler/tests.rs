@@ -2411,3 +2411,52 @@ async fn test_alter_table() {
 
     env.shutdown().await;
 }
+
+#[tokio::test]
+async fn test_initial_copy_iceberg_ack_without_wal() {
+    let mut env = TestEnvironment::default().await;
+    let sender = env.handler.get_event_sender();
+
+    // Subscribe to iceberg flush LSN and inspect WAL flush LSN
+    let mut flush_lsn_rx = env.table_event_manager.subscribe_flush_lsn();
+    assert_eq!(*flush_lsn_rx.borrow(), 0);
+    assert_eq!(*env.wal_flush_lsn_rx.borrow(), 0);
+
+    // Start initial copy and emit a copied row (should not go to WAL)
+    sender
+        .send(TableEvent::StartInitialCopy)
+        .await
+        .expect("send start initial copy");
+
+    sender
+        .send(TableEvent::Append {
+            row: create_row(10, "InitCopy", 1),
+            xact_id: None,
+            lsn: 0,
+            is_copied: true,
+            is_recovery: false,
+        })
+        .await
+        .expect("send copied row");
+
+    // Finish initial copy with a start LSN and ensure iceberg snapshot completes
+    let start_lsn = 42u64;
+    sender
+        .send(TableEvent::FinishInitialCopy { start_lsn })
+        .await
+        .expect("send finish initial copy");
+
+    // Wait for iceberg flush LSN to reach start_lsn, indicating snapshot persisted
+    loop {
+        let lsn = *flush_lsn_rx.borrow();
+        if lsn >= start_lsn {
+            break;
+        }
+        flush_lsn_rx.changed().await.unwrap();
+    }
+
+    // WAL flush LSN should still be zero since initial copy events bypass WAL
+    assert_eq!(*env.wal_flush_lsn_rx.borrow(), 0);
+
+    env.shutdown().await;
+}
