@@ -44,6 +44,8 @@ where
     let arrow_schema = Arc::new(arrow_schema);
 
     let mut config = config.unwrap_or_default();
+    // Use 4 parallel writers
+    config.num_writer_tasks = 4;
 
     // Create output directory for initial copy files
     let output_dir = std::env::temp_dir()
