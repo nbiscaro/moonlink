@@ -290,7 +290,7 @@ mod tests {
             )
             .await;
 
-        let (files, mut indices) = match &table.next_snapshot_task.new_streaming_xact[0] {
+        let (mut files, mut indices) = match &table.next_snapshot_task.new_streaming_xact[0] {
             TransactionStreamOutput::Commit(commit) => {
                 (commit.get_flushed_data_files(), commit.get_file_indices())
             }
@@ -307,6 +307,8 @@ mod tests {
             vec![k1, k2].into_iter(),
         );
         let results = index.search_values(&lookups).await;
+        // Ensure deterministic order for seg_idx mapping in assertions
+        files.sort_by_key(|f| f.file_path().clone());
         let file_ids: Vec<_> = files.iter().map(|f| f.file_id()).collect();
         assert!(results.contains(&(k1, RecordLocation::DiskFile(file_ids[0], 0))));
         assert!(results.contains(&(k2, RecordLocation::DiskFile(file_ids[1], 1))));
