@@ -362,7 +362,9 @@ impl TableHandler {
                             uuid: uuid::Uuid::new_v4(),
                             force_create: true,
                             dump_snapshot: false,
-                            iceberg_snapshot_option: IcebergSnapshotOption::Skip,
+                            iceberg_snapshot_option: IcebergSnapshotOption::BestEffort(
+                                uuid::Uuid::new_v4()
+                            ),
                             index_merge_option: MaintenanceOption::Skip,
                             data_compaction_option: MaintenanceOption::Skip,
                         }));
@@ -803,7 +805,7 @@ impl TableHandler {
             table_handler_state.special_table_state == SpecialTableState::InitialCopy
         );
 
-        if !event.is_recovery() {
+        if !event.is_recovery() && !is_initial_copy_event {
             table.push_wal_event(&event);
         }
 
