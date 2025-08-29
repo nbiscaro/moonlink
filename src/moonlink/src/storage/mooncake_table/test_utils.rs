@@ -102,6 +102,7 @@ pub async fn test_append_only_table(context: &TestContext, table_name: &str) -> 
     let mut table_config = test_mooncake_table_config(context);
     table_config.batch_size = 2;
     table_config.append_only = true;
+    table_config.row_identity = IdentityProp::None;
     let wal_config = WalConfig::default_wal_config_local(WAL_TEST_TABLE_ID, &context.path());
     let wal_manager = WalManager::new(&wal_config);
     MooncakeTable::new(
@@ -109,7 +110,6 @@ pub async fn test_append_only_table(context: &TestContext, table_name: &str) -> 
         table_name.to_string(),
         1,
         context.path(),
-        IdentityProp::None,
         iceberg_table_config.clone(),
         table_config,
         wal_manager,

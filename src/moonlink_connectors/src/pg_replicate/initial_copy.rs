@@ -1,6 +1,8 @@
+use crate::pg_replicate::conversions::table_row::TableRow;
 use crate::pg_replicate::initial_copy_writer::{
     create_batch_channel, ArrowBatchBuilder, InitialCopyWriterConfig, ParquetFileWriter,
 };
+use crate::pg_replicate::postgres_source::TableCopyStreamError;
 use crate::pg_replicate::postgres_source::{PostgresSource, TableCopyStream};
 use crate::pg_replicate::table::{ColumnSchema, LookupKey, SrcTableId, TableName, TableSchema};
 use crate::pg_replicate::util::postgres_schema_to_moonlink_schema;
@@ -34,12 +36,7 @@ pub async fn copy_table_stream<S>(
     config: Option<InitialCopyWriterConfig>,
 ) -> Result<CopyProgress>
 where
-    S: Stream<
-        Item = std::result::Result<
-            crate::pg_replicate::conversions::table_row::TableRow,
-            crate::pg_replicate::postgres_source::TableCopyStreamError,
-        >,
-    >,
+    S: Stream<Item = std::result::Result<TableRow, TableCopyStreamError>>,
 {
     // Convert PostgreSQL schema to Arrow schema
     let (arrow_schema, _identity_prop) = postgres_schema_to_moonlink_schema(&table_schema);
@@ -127,6 +124,9 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::pg_replicate::conversions::table_row::{TableRow, TableRowConversionError};
+    use crate::pg_replicate::conversions::Cell;
+    use crate::pg_replicate::postgres_source::TableCopyStreamError;
     use crate::pg_replicate::table::{ColumnSchema, LookupKey, TableName};
     use futures::stream;
     use moonlink_error::ErrorStruct;
@@ -232,13 +232,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handles_empty_stream() {
-        let stream = stream::iter(vec![]
-            as Vec<
-                std::result::Result<
-                    crate::pg_replicate::conversions::table_row::TableRow,
-                    crate::pg_replicate::postgres_source::TableCopyStreamError,
-                >,
-            >);
+        let stream =
+            stream::iter(vec![] as Vec<std::result::Result<TableRow, TableCopyStreamError>>);
         let (tx, mut rx) = mpsc::channel::<TableEvent>(8);
         let schema = make_test_schema("empty");
 
@@ -279,8 +274,8 @@ mod tests {
         // Build many rows
         let mut rows_vec = Vec::new();
         for i in 0..200 {
-            let tr = crate::pg_replicate::conversions::table_row::TableRow {
-                values: vec![crate::pg_replicate::conversions::Cell::I32(i)],
+            let tr = TableRow {
+                values: vec![Cell::I32(i)],
             };
             rows_vec.push(Ok(tr));
         }
@@ -326,17 +321,10 @@ mod tests {
     #[tokio::test]
     async fn test_propagates_stream_error() {
         // Use a conversion error that maps to our Error type
-        let stream = stream::iter(
-            vec![Err(crate::pg_replicate::postgres_source::TableCopyStreamError::ConversionError(
-                crate::pg_replicate::conversions::table_row::TableRowConversionError::UnterminatedRow,
-            ))]
-                as Vec<
-                    std::result::Result<
-                        crate::pg_replicate::conversions::table_row::TableRow,
-                        crate::pg_replicate::postgres_source::TableCopyStreamError,
-                    >,
-                >,
-        );
+        let stream = stream::iter(vec![Err(TableCopyStreamError::ConversionError(
+            TableRowConversionError::UnterminatedRow,
+        ))]
+            as Vec<std::result::Result<TableRow, TableCopyStreamError>>);
         let (tx, _) = mpsc::channel::<TableEvent>(1);
         let schema = make_test_schema("broken");
 

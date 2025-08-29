@@ -62,10 +62,10 @@ impl MooncakeTable {
         let mut commit = TransactionStreamCommit::from_disk_files(disk_files, lsn);
 
         // Build file index if needed (skip for append-only tables)
-        if !matches!(self.metadata.identity, IdentityProp::None) {
+        if !matches!(self.metadata.config.row_identity, IdentityProp::None) {
             // Clone owned inputs needed for async build without capturing &self.
             let files = commit.get_flushed_data_files();
-            let identity = self.metadata.identity.clone();
+            let identity = self.metadata.config.row_identity.clone();
             let table_dir: PathBuf = self.metadata.path.clone();
             let index_file_id = self.next_file_id as u64;
 

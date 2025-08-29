@@ -143,7 +143,7 @@ impl ColumnStoreBuffer {
     /// finalize it and start a new one.
     ///
     #[allow(clippy::type_complexity)]
-    pub fn append_row(
+    pub(super) fn append_row(
         &mut self,
         row: MoonlinkRow,
     ) -> Result<(u64, usize, Option<(u64, Arc<RecordBatch>)>)> {
