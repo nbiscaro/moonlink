@@ -2460,3 +2460,56 @@ async fn test_initial_copy_iceberg_ack_without_wal() {
 
     env.shutdown().await;
 }
+
+#[tokio::test]
+async fn test_finish_initial_copy_overlaps_with_ongoing_snapshot() {
+    // Setup environment
+    let mut env = TestEnvironment::default().await;
+    let sender = env.handler.get_event_sender();
+
+    // Start initial copy mode
+    sender
+        .send(TableEvent::StartInitialCopy)
+        .await
+        .expect("send start initial copy");
+
+    // Simulate initial copy by loading a parquet file
+    let start_lsn = 123u64;
+    let file_path = generate_parquet_file(&env.temp_dir, "init_copy_overlap.parquet").await;
+    sender
+        .send(TableEvent::LoadFiles {
+            files: vec![file_path],
+            lsn: start_lsn,
+        })
+        .await
+        .expect("send LoadFiles");
+
+    // Kick off a periodic snapshot first so that a snapshot may be in-flight
+    sender
+        .send(TableEvent::PeriodicalMooncakeTableSnapshot(
+            uuid::Uuid::new_v4(),
+        ))
+        .await
+        .expect("send periodic snapshot");
+
+    // Immediately finish initial copy; previously this could assert when snapshot was already ongoing
+    sender
+        .send(TableEvent::FinishInitialCopy { start_lsn })
+        .await
+        .expect("send finish initial copy");
+
+    // Wait for iceberg flush LSN to reach the start_lsn, indicating the copy has been persisted
+    let mut flush_lsn_rx = env.table_event_manager.subscribe_flush_lsn();
+    loop {
+        let lsn = *flush_lsn_rx.borrow();
+        if lsn >= start_lsn {
+            break;
+        }
+        flush_lsn_rx.changed().await.unwrap();
+    }
+
+    // Verify snapshot exposes copied rows at start_lsn
+    env.verify_snapshot(start_lsn, &[1, 2, 3]).await;
+
+    env.shutdown().await;
+}
