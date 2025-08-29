@@ -241,6 +241,10 @@ impl TableHandlerState {
         }
     }
 
+    pub(crate) fn is_in_blocking_state(&self) -> bool {
+        self.special_table_state != SpecialTableState::Normal
+    }
+
     /// Get the largest LSN where all updates have been persisted into iceberg.
     /// The difference between "persisted table LSN" and "iceberg snapshot LSN" is, suppose we have two tables, table A has persisted all changes to iceberg with flush LSN-1;
     /// if there're no further updates to the table A, meanwhile there're updates to table B with LSN-2, flush LSN-1 actually represents a consistent view of LSN-2.

@@ -769,7 +769,9 @@ impl TableHandler {
         // Replication events
         // ==============================
         //
-        if table_handler_state.special_table_state == SpecialTableState::InitialCopy {
+
+        // If the table is in a blocking state, buffer the event.
+        if table_handler_state.is_in_blocking_state() {
             table_handler_state.initial_copy_buffered_events.push(event);
             return;
         }
