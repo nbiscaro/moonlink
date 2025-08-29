@@ -2420,25 +2420,24 @@ async fn test_initial_copy_iceberg_ack_without_wal() {
     assert_eq!(*flush_lsn_rx.borrow(), 0);
     assert_eq!(*env.wal_flush_lsn_rx.borrow(), 0);
 
-    // Start initial copy and emit a copied row (should not go to WAL)
+    // Start initial copy (enter blocking state for CDC events)
     sender
         .send(TableEvent::StartInitialCopy)
         .await
         .expect("send start initial copy");
 
+    // Simulate initial copy by generating a parquet file and sending LoadFiles
+    let start_lsn = 42u64;
+    let file_path = generate_parquet_file(&env.temp_dir, "init_copy.parquet").await;
     sender
-        .send(TableEvent::Append {
-            row: create_row(10, "InitCopy", 1),
-            xact_id: None,
-            lsn: 0,
-            is_copied: true,
-            is_recovery: false,
+        .send(TableEvent::LoadFiles {
+            files: vec![file_path],
+            lsn: start_lsn,
         })
         .await
-        .expect("send copied row");
+        .expect("send LoadFiles");
 
-    // Finish initial copy with a start LSN and ensure iceberg snapshot completes
-    let start_lsn = 42u64;
+    // Finish initial copy; this triggers an iceberg snapshot (BestEffort) at start_lsn
     sender
         .send(TableEvent::FinishInitialCopy { start_lsn })
         .await
@@ -2453,8 +2452,11 @@ async fn test_initial_copy_iceberg_ack_without_wal() {
         flush_lsn_rx.changed().await.unwrap();
     }
 
-    // WAL flush LSN should still be zero since initial copy events bypass WAL
+    // WAL flush LSN should still be zero since initial copy bypasses WAL
     assert_eq!(*env.wal_flush_lsn_rx.borrow(), 0);
+
+    // Verify the snapshot contains the rows from the parquet (ids 1,2,3)
+    env.verify_snapshot(start_lsn, &[1, 2, 3]).await;
 
     env.shutdown().await;
 }

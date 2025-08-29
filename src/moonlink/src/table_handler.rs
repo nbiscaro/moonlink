@@ -783,7 +783,7 @@ impl TableHandler {
             return;
         }
 
-        if !event.is_recovery() && !is_initial_copy_event {
+        if !event.is_recovery() {
             table.push_wal_event(&event);
         }
 
