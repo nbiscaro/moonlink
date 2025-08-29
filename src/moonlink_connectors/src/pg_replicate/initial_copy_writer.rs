@@ -405,4 +405,136 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert!(Path::new(&files[0]).exists());
     }
+
+    #[tokio::test]
+    async fn parquet_multi_writer_idle_writers_produce_no_files() {
+        // num_writer_tasks = 4, send exactly 1 non-empty batch; expect exactly 1 file
+        let output_dir = std::env::temp_dir().join(format!("ml_icw_idle_{}", uuid::Uuid::now_v7()));
+        let schema = int32_schema();
+        let config = InitialCopyWriterConfig {
+            target_file_size_bytes: usize::MAX, // avoid rotation
+            max_rows_per_batch: 1024,
+            num_writer_tasks: 4,
+        };
+
+        let (tx, rx) = create_batch_channel(4);
+        let shared_rx = SharedBatchReceiver::new(rx);
+
+        // Spawn 4 writers
+        let mut handles = Vec::new();
+        for _ in 0..config.num_writer_tasks {
+            let writer = ParquetFileWriter::new(output_dir.clone(), schema.clone(), config.clone());
+            let srx = shared_rx.clone();
+            handles.push(tokio::spawn(
+                async move { writer.write_from_shared(srx).await },
+            ));
+        }
+
+        // Send exactly one batch
+        tx.send(make_batch(&[1, 2, 3])).await.unwrap();
+        drop(tx);
+
+        // Collect results
+        let mut files_written = Vec::new();
+        for h in handles {
+            let mut files = h.await.unwrap().unwrap();
+            files_written.append(&mut files);
+        }
+
+        assert_eq!(
+            files_written.len(),
+            1,
+            "only one writer should produce a file"
+        );
+        assert!(Path::new(&files_written[0]).exists());
+    }
+
+    #[tokio::test]
+    async fn parquet_multi_writer_tail_files_bounded_by_writers_and_batches() {
+        // num_writer_tasks = 3, send multiple batches; ensure file count is reasonable (no rotation)
+        let output_dir = std::env::temp_dir().join(format!("ml_icw_tail_{}", uuid::Uuid::now_v7()));
+        let schema = int32_schema();
+        let config = InitialCopyWriterConfig {
+            target_file_size_bytes: usize::MAX, // one file per writer that received at least one batch
+            max_rows_per_batch: 2,
+            num_writer_tasks: 3,
+        };
+
+        let (tx, rx) = create_batch_channel(8);
+        let shared_rx = SharedBatchReceiver::new(rx);
+
+        // Spawn 3 writers
+        let mut handles = Vec::new();
+        for _ in 0..config.num_writer_tasks {
+            let writer = ParquetFileWriter::new(output_dir.clone(), schema.clone(), config.clone());
+            let srx = shared_rx.clone();
+            handles.push(tokio::spawn(
+                async move { writer.write_from_shared(srx).await },
+            ));
+        }
+
+        // Send several batches; distribution across writers is nondeterministic
+        let batches_sent = 5;
+        for i in 0..batches_sent {
+            tx.send(make_batch(&[i, i + 1])).await.unwrap();
+        }
+        drop(tx);
+
+        let mut files_written = Vec::new();
+        for h in handles {
+            let mut files = h.await.unwrap().unwrap();
+            files_written.append(&mut files);
+        }
+
+        // With no rotation, each writer produces at most one file if it received any batch.
+        // So total files is between 1 and min(num_writer_tasks, batches_sent).
+        assert!(
+            !files_written.is_empty(),
+            "at least one writer should produce a file"
+        );
+        assert!(
+            files_written.len() as u32 <= config.num_writer_tasks as u32,
+            "should be at most one file per writer"
+        );
+        assert!(
+            files_written.len() as u32 <= batches_sent as u32,
+            "cannot exceed number of batches"
+        );
+        for f in &files_written {
+            assert!(Path::new(f).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn parquet_writer_error_propagation_on_invalid_output_dir() {
+        // Create a path that is a file (not a directory); writer should error when trying to create file under it
+        let base = std::env::temp_dir().join(format!("ml_icw_err_{}", uuid::Uuid::now_v7()));
+        // Ensure base exists
+        tokio::fs::create_dir_all(&base).await.unwrap();
+        let not_a_dir = base.join("not_a_dir");
+        // Create a file at not_a_dir
+        tokio::fs::write(&not_a_dir, b"block").await.unwrap();
+
+        let schema = int32_schema();
+        let config = InitialCopyWriterConfig {
+            target_file_size_bytes: usize::MAX,
+            max_rows_per_batch: 1024,
+            num_writer_tasks: 1,
+        };
+
+        let (tx, rx) = create_batch_channel(2);
+        let shared_rx = SharedBatchReceiver::new(rx);
+        let writer = ParquetFileWriter::new(not_a_dir.clone(), schema.clone(), config.clone());
+        let handle = tokio::spawn(async move { writer.write_from_shared(shared_rx).await });
+
+        // Send one batch to trigger file creation under a non-directory parent
+        tx.send(make_batch(&[42])).await.unwrap();
+        drop(tx);
+
+        let res = handle.await.unwrap();
+        assert!(
+            res.is_err(),
+            "writer should return error on invalid output dir"
+        );
+    }
 }
