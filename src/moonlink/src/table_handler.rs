@@ -349,17 +349,21 @@ impl TableHandler {
                     TableEvent::FinishInitialCopy { start_lsn } => {
                         debug!("finishing initial copy");
                         // Force create the snapshot with LSN `start_lsn`
-                        assert!(table.create_snapshot(SnapshotOption {
-                            uuid: uuid::Uuid::new_v4(),
-                            force_create: true,
-                            dump_snapshot: false,
-                            iceberg_snapshot_option: IcebergSnapshotOption::BestEffort(
-                                uuid::Uuid::new_v4()
-                            ),
-                            index_merge_option: MaintenanceOption::Skip,
-                            data_compaction_option: MaintenanceOption::Skip,
-                        }));
-                        table_handler_state.mooncake_snapshot_ongoing = true;
+                        if !table_handler_state.mooncake_snapshot_ongoing {
+                            let created = table.create_snapshot(SnapshotOption {
+                                uuid: uuid::Uuid::new_v4(),
+                                force_create: true,
+                                dump_snapshot: false,
+                                iceberg_snapshot_option: IcebergSnapshotOption::BestEffort(
+                                    uuid::Uuid::new_v4(),
+                                ),
+                                index_merge_option: MaintenanceOption::Skip,
+                                data_compaction_option: MaintenanceOption::Skip,
+                            });
+                            if created {
+                                table_handler_state.mooncake_snapshot_ongoing = true;
+                            }
+                        }
                         table_handler_state.finish_initial_copy(start_lsn);
 
                         // Drop any events that have LSN less than the start LSN during apply.
