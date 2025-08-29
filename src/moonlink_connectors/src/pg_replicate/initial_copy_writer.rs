@@ -5,6 +5,7 @@ use arrow::datatypes::Schema;
 use arrow_array::RecordBatch;
 use moonlink_error::{ErrorStatus, ErrorStruct};
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 
 use crate::pg_replicate::conversions::table_row::TableRow;
 use crate::Result;
@@ -18,6 +19,8 @@ pub struct InitialCopyWriterConfig {
     pub target_file_size_bytes: usize,
     /// Max number of rows per Arrow RecordBatch before flushing to the writer.
     pub max_rows_per_batch: usize,
+    /// Number of parallel writer tasks to consume from the batch queue.
+    pub num_writer_tasks: usize,
 }
 
 impl Default for InitialCopyWriterConfig {
@@ -27,6 +30,8 @@ impl Default for InitialCopyWriterConfig {
             target_file_size_bytes: DiskSliceWriterConfig::default_disk_slice_parquet_file_size(),
             // Align batch size with mooncake table default batch size
             max_rows_per_batch: MooncakeTableConfig::default_batch_size(),
+            // Default to 4 writer tasks
+            num_writer_tasks: 4,
         }
     }
 }
@@ -60,6 +65,21 @@ impl BatchReceiver {
     /// Receive the next RecordBatch from the channel. Returns None if closed.
     pub async fn recv(&mut self) -> Option<RecordBatch> {
         self.0.recv().await
+    }
+}
+
+/// Shared receiver wrapper to enable multiple writer tasks to consume from a single queue.
+#[derive(Clone)]
+pub struct SharedBatchReceiver(Arc<Mutex<BatchReceiver>>);
+
+impl SharedBatchReceiver {
+    pub fn new(rx: BatchReceiver) -> Self {
+        Self(Arc::new(Mutex::new(rx)))
+    }
+
+    pub async fn recv(&self) -> Option<RecordBatch> {
+        let mut guard = self.0.lock().await;
+        guard.recv().await
     }
 }
 
@@ -126,9 +146,12 @@ impl ParquetFileWriter {
         self.output_dir.join(filename)
     }
 
-    /// Consume RecordBatches and write Parquet files.
-    /// Returns the list of file paths written.
-    pub async fn write_from_channel(mut self, mut rx: BatchReceiver) -> Result<Vec<String>> {
+    /// Consume RecordBatches from a shared receiver and write Parquet files.
+    /// Returns the list of file paths written by this worker.
+    pub async fn write_from_shared(
+        mut self,
+        shared_rx: SharedBatchReceiver,
+    ) -> Result<Vec<String>> {
         use moonlink::get_default_parquet_properties;
         use parquet::arrow::AsyncArrowWriter;
 
@@ -136,7 +159,7 @@ impl ParquetFileWriter {
         let mut writer: Option<AsyncArrowWriter<tokio::fs::File>> = None;
         let mut current_file_path: Option<PathBuf> = None;
 
-        while let Some(batch) = rx.recv().await {
+        while let Some(batch) = shared_rx.recv().await {
             if batch.num_columns() == 0 || batch.num_rows() == 0 {
                 continue;
             }
@@ -211,6 +234,7 @@ mod tests {
             cfg.max_rows_per_batch,
             MooncakeTableConfig::default_batch_size()
         );
+        assert_eq!(cfg.num_writer_tasks, 4);
     }
 
     #[tokio::test]
@@ -307,11 +331,13 @@ mod tests {
         let config = InitialCopyWriterConfig {
             target_file_size_bytes: 0,
             max_rows_per_batch: 1024,
+            num_writer_tasks: 4,
         };
 
         let (tx, rx) = create_batch_channel(8);
         let writer = ParquetFileWriter::new(output_dir.clone(), schema.clone(), config);
-        let handle = tokio::spawn(async move { writer.write_from_channel(rx).await });
+        let shared_rx = SharedBatchReceiver::new(rx);
+        let handle = tokio::spawn(async move { writer.write_from_shared(shared_rx).await });
 
         // Send three small batches
         tx.send(make_batch(&[1])).await.unwrap();
@@ -340,7 +366,8 @@ mod tests {
 
         let (tx, rx) = create_batch_channel(8);
         let writer = ParquetFileWriter::new(output_dir.clone(), schema.clone(), config);
-        let handle = tokio::spawn(async move { writer.write_from_channel(rx).await });
+        let shared_rx = SharedBatchReceiver::new(rx);
+        let handle = tokio::spawn(async move { writer.write_from_shared(shared_rx).await });
 
         // Send an empty batch (0 rows) and a non-empty one
         let empty = RecordBatch::new_empty(schema.clone());
@@ -363,11 +390,13 @@ mod tests {
         let config = InitialCopyWriterConfig {
             target_file_size_bytes: usize::MAX,
             max_rows_per_batch: 1024,
+            num_writer_tasks: 1,
         };
 
         let (tx, rx) = create_batch_channel(4);
         let writer = ParquetFileWriter::new(output_dir.clone(), schema.clone(), config);
-        let handle = tokio::spawn(async move { writer.write_from_channel(rx).await });
+        let shared_rx = SharedBatchReceiver::new(rx);
+        let handle = tokio::spawn(async move { writer.write_from_shared(shared_rx).await });
 
         tx.send(make_batch(&[7, 8, 9])).await.unwrap();
         drop(tx);
