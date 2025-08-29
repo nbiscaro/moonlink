@@ -57,6 +57,16 @@ impl PostgresSource {
     pub fn get_confirmed_flush_lsn(&self) -> PgLsn {
         self.confirmed_flush_lsn
     }
+
+    /// Open a fresh replication client + connection using the stored URI.
+    pub async fn connect_replication(
+        &self,
+    ) -> Result<(ReplicationClient, Connection<Socket, TlsStream<Socket>>), PostgresSourceError>
+    {
+        ReplicationClient::connect(&self.uri, true)
+            .await
+            .map_err(PostgresSourceError::from)
+    }
 }
 
 /// Configuration needed to create a CDC stream
@@ -338,6 +348,12 @@ impl CdcStream {
             .await?;
 
         Ok(())
+    }
+
+    /// Clone a snapshot of the currently known table schemas.
+    pub fn schemas_snapshot(self: Pin<&mut Self>) -> Vec<TableSchema> {
+        let this = self.project();
+        this.table_schemas.values().cloned().collect()
     }
 
     pub fn add_table_schema(self: Pin<&mut Self>, schema: TableSchema) {

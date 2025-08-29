@@ -21,6 +21,20 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::time::SystemTime;
     use tempfile::TempDir;
+    use tokio_postgres::NoTls;
+
+    // Helper: terminate replication using a separate connection to avoid borrowing conflicts
+    async fn terminate_replication_new_conn() {
+        let (client, connection) = tokio_postgres::connect(SRC_URI, NoTls).await.unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let _ = client
+            .simple_query(
+                "SELECT pg_terminate_backend(active_pid)\n                 FROM pg_replication_slots\n                 WHERE slot_name LIKE 'moonlink_slot%' AND active_pid IS NOT NULL;",
+            )
+            .await;
+    }
 
     // ───────────────────────────── Tests ─────────────────────────────
 
@@ -953,5 +967,170 @@ mod tests {
             .get_table_schema(DATABASE.to_string(), NON_EXISTENT_TABLE.to_string())
             .await;
         assert!(res.is_err());
+    }
+
+    /// Reconnect resumes replication (single table)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_reconnect_resumes_replication_single_table() {
+        let (guard, client) = TestGuard::new(Some("reconnect_single"), true).await;
+        let backend = guard.backend();
+
+        // Insert a baseline row and verify it's visible
+        client
+            .simple_query("INSERT INTO reconnect_single VALUES (1,'a');")
+            .await
+            .unwrap();
+        let lsn1 = current_wal_lsn(&client).await;
+        let ids = ids_from_state(
+            &backend
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), Some(lsn1))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(ids, HashSet::from([1]));
+
+        // Terminate replication to force reconnect
+        terminate_replication_new_conn().await;
+
+        // Insert rows after termination; these should be replicated after reconnect
+        client
+            .simple_query("INSERT INTO reconnect_single VALUES (2,'b'),(3,'c');")
+            .await
+            .unwrap();
+        let lsn2 = current_wal_lsn(&client).await;
+
+        // Wait until WAL flush reaches lsn2, then verify rows once
+        let ids = ids_from_state(
+            &backend
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), Some(lsn2))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(ids, HashSet::from([1, 2, 3]));
+    }
+
+    /// Reconnect preserves multiple tables
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_reconnect_preserves_multiple_tables() {
+        let (guard, client) = TestGuard::new(Some("reconnect_multi_a"), true).await;
+        let backend = guard.backend();
+
+        // Create second source table and register a second moonlink table
+        client
+            .simple_query("DROP TABLE IF EXISTS reconnect_multi_b; CREATE TABLE reconnect_multi_b (id BIGINT PRIMARY KEY, name TEXT);")
+            .await
+            .unwrap();
+        let table_b = format!("{TABLE}_b");
+        backend
+            .create_table(
+                DATABASE.to_string(),
+                table_b.clone(),
+                /*table_name=*/ "public.reconnect_multi_b".to_string(),
+                SRC_URI.to_string(),
+                guard.get_serialized_table_config(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Baseline inserts into both tables
+        client
+            .simple_query("INSERT INTO reconnect_multi_a VALUES (1,'a1'),(2,'a2');")
+            .await
+            .unwrap();
+        client
+            .simple_query("INSERT INTO reconnect_multi_b VALUES (10,'b1'),(20,'b2');")
+            .await
+            .unwrap();
+        let lsn1 = current_wal_lsn(&client).await;
+
+        // Verify baseline visible on both
+        let ids_a = ids_from_state(
+            &backend
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), Some(lsn1))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(ids_a, HashSet::from([1, 2]));
+        let ids_b = ids_from_state(
+            &backend
+                .scan_table(DATABASE.to_string(), table_b.clone(), Some(lsn1))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(ids_b, HashSet::from([10, 20]));
+
+        // Terminate replication to force reconnect
+        terminate_replication_new_conn().await;
+
+        // New inserts after termination
+        client
+            .simple_query("INSERT INTO reconnect_multi_a VALUES (3,'a3'),(4,'a4');")
+            .await
+            .unwrap();
+        client
+            .simple_query("INSERT INTO reconnect_multi_b VALUES (30,'b3'),(40,'b4');")
+            .await
+            .unwrap();
+        let lsn2 = current_wal_lsn(&client).await;
+
+        // Verify both tables include all rows up to lsn2
+        let ids_a = ids_from_state(
+            &backend
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), Some(lsn2))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(ids_a, HashSet::from([1, 2, 3, 4]));
+        let ids_b = ids_from_state(
+            &backend
+                .scan_table(DATABASE.to_string(), table_b, Some(lsn2))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(ids_b, HashSet::from([10, 20, 30, 40]));
+    }
+
+    /// Large transaction across reconnect: many rows in one txn; disconnect mid-way; commit
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn test_large_transaction_across_reconnect() {
+        let (guard, mut client) = TestGuard::new(Some("txn_large"), true).await;
+        let backend = guard.backend();
+
+        // Begin a large transaction inserting many rows in batches
+        let tx = client.transaction().await.unwrap();
+        let total: i64 = 5000;
+        let batch: i64 = 500;
+        let mut inserted: i64 = 0;
+        while inserted < total {
+            let start = inserted + 1;
+            let end = (inserted + batch).min(total);
+            let stmt = format!(
+                "INSERT INTO txn_large (id, name) SELECT gs, 'v_' || gs::text FROM generate_series({start}, {end}) AS gs;"
+            );
+            tx.execute(stmt.as_str(), &[]).await.unwrap();
+            inserted = end;
+            if inserted == total / 2 {
+                // Disconnect replication mid-way
+                terminate_replication_new_conn().await;
+            }
+        }
+
+        // Commit after disconnect; reconnect should resume and apply once
+        tx.commit().await.unwrap();
+        let lsn = current_wal_lsn(&client).await;
+
+        // Verify all rows 1..=total appear exactly once
+        let ids = ids_from_state(
+            &backend
+                .scan_table(DATABASE.to_string(), TABLE.to_string(), Some(lsn))
+                .await
+                .unwrap(),
+        );
+        let expected: HashSet<i64> = (1..=total).collect();
+        assert_eq!(ids, expected);
     }
 }
