@@ -1,6 +1,7 @@
 use crate::pg_replicate::conversions::table_row::TableRow;
 use crate::pg_replicate::initial_copy_writer::{
     create_batch_channel, ArrowBatchBuilder, InitialCopyWriterConfig, ParquetFileWriter,
+    SharedBatchReceiver,
 };
 use crate::pg_replicate::postgres_source::TableCopyStreamError;
 use crate::pg_replicate::postgres_source::{PostgresSource, TableCopyStream};
@@ -55,14 +56,21 @@ where
     // Create Arrow batch builder
     let mut batch_builder = ArrowBatchBuilder::new(arrow_schema.clone(), config.max_rows_per_batch);
 
-    // Create and spawn Parquet file writer
-    let parquet_writer = ParquetFileWriter {
-        output_dir,
-        schema: arrow_schema,
-        config,
-    };
-    let writer_handle =
-        tokio::spawn(async move { parquet_writer.write_from_channel(batch_rx).await });
+    // Create shared receiver and spawn N Parquet writer tasks
+    let shared_rx = SharedBatchReceiver::new(batch_rx);
+    let num_workers = config.num_writer_tasks.max(1);
+    let mut writer_handles = Vec::with_capacity(num_workers);
+    for _ in 0..num_workers {
+        let writer = ParquetFileWriter {
+            output_dir: output_dir.clone(),
+            schema: arrow_schema.clone(),
+            config: config.clone(),
+        };
+        let rx = shared_rx.clone();
+        writer_handles.push(tokio::spawn(
+            async move { writer.write_from_shared(rx).await },
+        ));
+    }
 
     // Stream rows into batches
     pin_mut!(stream);
@@ -90,8 +98,12 @@ where
     // Close channel to signal writer completion
     drop(batch_tx);
 
-    // Wait for writer to finish and get list of files written
-    let files_written = writer_handle.await??;
+    // Wait for all writers to finish and collect file paths
+    let mut files_written: Vec<String> = Vec::new();
+    for handle in writer_handles {
+        let mut files = handle.await??;
+        files_written.append(&mut files);
+    }
 
     tracing::info!(
         "Initial copy completed: {} rows, {} files written",
@@ -269,6 +281,7 @@ mod tests {
         let config = InitialCopyWriterConfig {
             target_file_size_bytes: 1024, // ~1KB
             max_rows_per_batch: 10,
+            num_writer_tasks: 1,
         };
 
         // Build many rows
