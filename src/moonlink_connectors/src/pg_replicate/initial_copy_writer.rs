@@ -21,6 +21,8 @@ pub struct InitialCopyWriterConfig {
     pub max_rows_per_batch: usize,
     /// Number of parallel writer tasks to consume from the batch queue.
     pub num_writer_tasks: usize,
+    /// Capacity of the bounded channel between producer and writers.
+    pub batch_channel_capacity: usize,
 }
 
 impl Default for InitialCopyWriterConfig {
@@ -30,8 +32,9 @@ impl Default for InitialCopyWriterConfig {
             target_file_size_bytes: DiskSliceWriterConfig::default_disk_slice_parquet_file_size(),
             // Align batch size with mooncake table default batch size
             max_rows_per_batch: MooncakeTableConfig::default_batch_size(),
-            // Default to 4 writer tasks
-            num_writer_tasks: 4,
+            // Default to no parallelism
+            num_writer_tasks: 1,
+            batch_channel_capacity: 16,
         }
     }
 }
@@ -234,7 +237,8 @@ mod tests {
             cfg.max_rows_per_batch,
             MooncakeTableConfig::default_batch_size()
         );
-        assert_eq!(cfg.num_writer_tasks, 4);
+        assert_eq!(cfg.num_writer_tasks, 1);
+        assert_eq!(cfg.batch_channel_capacity, 16);
     }
 
     #[tokio::test]
@@ -325,13 +329,14 @@ mod tests {
     #[tokio::test]
     async fn parquet_writer_writes_and_rotates_per_batch() {
         // Force rotation after every write by setting target size to 0
-        let output_dir =
-            std::env::temp_dir().join(format!("ml_icw_rotate_{}", uuid::Uuid::now_v7()));
+        let tempdir = tempfile::tempdir().unwrap();
+        let output_dir = tempdir.path().to_path_buf();
         let schema = int32_schema();
         let config = InitialCopyWriterConfig {
             target_file_size_bytes: 0,
             max_rows_per_batch: 1024,
             num_writer_tasks: 4,
+            batch_channel_capacity: 8,
         };
 
         let (tx, rx) = create_batch_channel(8);
@@ -359,8 +364,8 @@ mod tests {
 
     #[tokio::test]
     async fn parquet_writer_ignores_empty_batches() {
-        let output_dir =
-            std::env::temp_dir().join(format!("ml_icw_empty_{}", uuid::Uuid::now_v7()));
+        let tempdir = tempfile::tempdir().unwrap();
+        let output_dir = tempdir.path().to_path_buf();
         let schema = int32_schema();
         let config = InitialCopyWriterConfig::default();
 
@@ -384,13 +389,14 @@ mod tests {
     #[tokio::test]
     async fn parquet_writer_finalizes_on_channel_close() {
         // Large target size so no rotation happens during writes; file is finalized at the end
-        let output_dir =
-            std::env::temp_dir().join(format!("ml_icw_finalize_{}", uuid::Uuid::now_v7()));
+        let tempdir = tempfile::tempdir().unwrap();
+        let output_dir = tempdir.path().to_path_buf();
         let schema = int32_schema();
         let config = InitialCopyWriterConfig {
             target_file_size_bytes: usize::MAX,
             max_rows_per_batch: 1024,
             num_writer_tasks: 1,
+            batch_channel_capacity: 4,
         };
 
         let (tx, rx) = create_batch_channel(4);
@@ -409,12 +415,14 @@ mod tests {
     #[tokio::test]
     async fn parquet_multi_writer_idle_writers_produce_no_files() {
         // num_writer_tasks = 4, send exactly 1 non-empty batch; expect exactly 1 file
-        let output_dir = std::env::temp_dir().join(format!("ml_icw_idle_{}", uuid::Uuid::now_v7()));
+        let tempdir = tempfile::tempdir().unwrap();
+        let output_dir = tempdir.path().to_path_buf();
         let schema = int32_schema();
         let config = InitialCopyWriterConfig {
             target_file_size_bytes: usize::MAX, // avoid rotation
             max_rows_per_batch: 1024,
             num_writer_tasks: 4,
+            batch_channel_capacity: 4,
         };
 
         let (tx, rx) = create_batch_channel(4);
@@ -452,12 +460,14 @@ mod tests {
     #[tokio::test]
     async fn parquet_multi_writer_tail_files_bounded_by_writers_and_batches() {
         // num_writer_tasks = 3, send multiple batches; ensure file count is reasonable (no rotation)
-        let output_dir = std::env::temp_dir().join(format!("ml_icw_tail_{}", uuid::Uuid::now_v7()));
+        let tempdir = tempfile::tempdir().unwrap();
+        let output_dir = tempdir.path().to_path_buf();
         let schema = int32_schema();
         let config = InitialCopyWriterConfig {
             target_file_size_bytes: usize::MAX, // one file per writer that received at least one batch
             max_rows_per_batch: 2,
             num_writer_tasks: 3,
+            batch_channel_capacity: 8,
         };
 
         let (tx, rx) = create_batch_channel(8);
@@ -508,10 +518,8 @@ mod tests {
     #[tokio::test]
     async fn parquet_writer_error_propagation_on_invalid_output_dir() {
         // Create a path that is a file (not a directory); writer should error when trying to create file under it
-        let base = std::env::temp_dir().join(format!("ml_icw_err_{}", uuid::Uuid::now_v7()));
-        // Ensure base exists
-        tokio::fs::create_dir_all(&base).await.unwrap();
-        let not_a_dir = base.join("not_a_dir");
+        let base = tempfile::tempdir().unwrap();
+        let not_a_dir = base.path().join("not_a_dir");
         // Create a file at not_a_dir
         tokio::fs::write(&not_a_dir, b"block").await.unwrap();
 
@@ -520,6 +528,7 @@ mod tests {
             target_file_size_bytes: usize::MAX,
             max_rows_per_batch: 1024,
             num_writer_tasks: 1,
+            batch_channel_capacity: 2,
         };
 
         let (tx, rx) = create_batch_channel(2);
