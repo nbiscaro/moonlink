@@ -225,7 +225,7 @@ pub(crate) async fn perform_index_merge_for_test(
     let index_merge_result = sync_index_merge(receiver).await;
 
     table.set_file_indices_merge_res(index_merge_result);
-    assert!(table.create_snapshot(SnapshotOption {
+    assert!(table.try_create_mooncake_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
         dump_snapshot: false,
@@ -258,7 +258,7 @@ pub(crate) async fn perform_data_compaction_for_test(
     let data_compaction_result = sync_data_compaction(receiver).await;
 
     table.set_data_compaction_res(data_compaction_result);
-    assert!(table.create_snapshot(SnapshotOption {
+    assert!(table.try_create_mooncake_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
         dump_snapshot: false,
@@ -355,7 +355,7 @@ pub(crate) async fn create_mooncake_snapshot_for_test(
     DataCompactionMaintenanceStatus,
     Vec<String>,
 ) {
-    let mooncake_snapshot_created = table.create_snapshot(SnapshotOption {
+    let mooncake_snapshot_created = table.try_create_mooncake_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
         dump_snapshot: false,
@@ -407,7 +407,7 @@ async fn sync_mooncake_snapshot_and_create_new_by_iceberg_payload(
     table.set_iceberg_snapshot_res(iceberg_snapshot_result);
 
     // Create mooncake snapshot after buffering iceberg snapshot result, to make sure mooncake snapshot is at a consistent state.
-    assert!(table.create_snapshot(SnapshotOption {
+    assert!(table.try_create_mooncake_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
         dump_snapshot: false,
@@ -461,7 +461,7 @@ pub(crate) async fn create_mooncake_and_persist_for_data_compaction_for_test(
         index_merge_option: MaintenanceOption::Skip,
         data_compaction_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
     };
-    assert!(table.create_snapshot(force_snapshot_option.clone()));
+    assert!(table.try_create_mooncake_snapshot(force_snapshot_option.clone()));
 
     // Create iceberg snapshot.
     let (_, iceberg_snapshot_payload, _, _, evicted_data_files_to_delete) =
@@ -478,7 +478,7 @@ pub(crate) async fn create_mooncake_and_persist_for_data_compaction_for_test(
     }
 
     // Get data compaction payload.
-    assert!(table.create_snapshot(force_snapshot_option.clone()));
+    assert!(table.try_create_mooncake_snapshot(force_snapshot_option.clone()));
     let (_, iceberg_snapshot_payload, _, data_compaction_payload, evicted_data_files_to_delete) =
         sync_mooncake_snapshot(table, receiver).await;
     // Delete evicted object storage cache entries immediately to make sure later accesses all happen on persisted files.
@@ -504,7 +504,7 @@ pub(crate) async fn create_mooncake_and_persist_for_data_compaction_for_test(
 
     // Set data compaction result and trigger another iceberg snapshot.
     table.set_data_compaction_res(data_compaction_result);
-    assert!(table.create_snapshot(SnapshotOption {
+    assert!(table.try_create_mooncake_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
         dump_snapshot: false,
@@ -530,7 +530,7 @@ pub(crate) async fn create_mooncake_and_iceberg_snapshot_for_index_merge_for_tes
         index_merge_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
         data_compaction_option: MaintenanceOption::BestEffort(uuid::Uuid::new_v4()),
     };
-    assert!(table.create_snapshot(force_snapshot_option.clone()));
+    assert!(table.try_create_mooncake_snapshot(force_snapshot_option.clone()));
 
     // Create iceberg snapshot.
     let (_, iceberg_snapshot_payload, _, _, evicted_data_files_to_delete) =
@@ -547,7 +547,7 @@ pub(crate) async fn create_mooncake_and_iceberg_snapshot_for_index_merge_for_tes
     }
 
     // Perform index merge.
-    assert!(table.create_snapshot(force_snapshot_option.clone()));
+    assert!(table.try_create_mooncake_snapshot(force_snapshot_option.clone()));
     let (_, iceberg_snapshot_payload, file_indice_merge_payload, _, evicted_data_files_to_delete) =
         sync_mooncake_snapshot(table, receiver).await;
     // Delete evicted object storage cache entries immediately to make sure later accesses all happen on persisted files.
@@ -561,7 +561,7 @@ pub(crate) async fn create_mooncake_and_iceberg_snapshot_for_index_merge_for_tes
     table.perform_index_merge(file_indice_merge_payload);
     let index_merge_result = sync_index_merge(receiver).await;
     table.set_file_indices_merge_res(index_merge_result);
-    assert!(table.create_snapshot(SnapshotOption {
+    assert!(table.try_create_mooncake_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         force_create: true,
         dump_snapshot: false,

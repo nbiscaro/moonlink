@@ -531,7 +531,7 @@ pub(crate) async fn replay(replay_filepath: &str) {
                 let mut snapshot_option = snapshot_initiation_event.option.clone();
                 snapshot_option.dump_snapshot = true;
                 // Event only recorded when snapshot gets created in source run.
-                assert!(table.create_snapshot(snapshot_option));
+                assert!(table.try_create_mooncake_snapshot(snapshot_option));
             }
             MooncakeTableEvent::MooncakeSnapshotCompletion(snapshot_completion_event) => {
                 assert!(ongoing_mooncake_snapshot_id.remove(&snapshot_completion_event.uuid));

@@ -433,7 +433,7 @@ async fn test_state_1_1() {
     table.append(row).unwrap();
 
     // Request to persist.
-    assert!(!table.create_snapshot(SnapshotOption {
+    assert!(!table.try_create_mooncake_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         dump_snapshot: false,
         force_create: false,
@@ -461,7 +461,7 @@ async fn test_state_1_2() {
     table.delete(row.clone(), /*lsn=*/ 1).await;
 
     // Request to persist.
-    assert!(!table.create_snapshot(SnapshotOption {
+    assert!(!table.try_create_mooncake_snapshot(SnapshotOption {
         uuid: uuid::Uuid::new_v4(),
         dump_snapshot: false,
         force_create: false,

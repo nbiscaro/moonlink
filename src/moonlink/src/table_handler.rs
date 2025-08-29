@@ -350,7 +350,7 @@ impl TableHandler {
                         debug!("finishing initial copy");
                         // Force create the snapshot with LSN `start_lsn`
                         if !table_handler_state.mooncake_snapshot_ongoing {
-                            let created = table.create_snapshot(SnapshotOption {
+                            let created = table.try_create_mooncake_snapshot(SnapshotOption {
                                 uuid: uuid::Uuid::new_v4(),
                                 force_create: true,
                                 dump_snapshot: false,
@@ -396,7 +396,7 @@ impl TableHandler {
                                 {
                                     table.force_empty_iceberg_payload();
                                 }
-                                assert!(table.create_snapshot(
+                                assert!(table.try_create_mooncake_snapshot(
                                     table_handler_state.get_mooncake_snapshot_option(
                                         /*request_force=*/ true, uuid
                                     )
@@ -408,10 +408,12 @@ impl TableHandler {
 
                         // Fallback to normal periodic snapshot.
                         table_handler_state.reset_iceberg_state_at_mooncake_snapshot();
-                        table_handler_state.mooncake_snapshot_ongoing = table.create_snapshot(
-                            table_handler_state
-                                .get_mooncake_snapshot_option(/*request_force=*/ false, uuid),
-                        );
+                        table_handler_state.mooncake_snapshot_ongoing = table
+                            .try_create_mooncake_snapshot(
+                                table_handler_state.get_mooncake_snapshot_option(
+                                    /*request_force=*/ false, uuid,
+                                ),
+                            );
                     }
                     TableEvent::RegularIcebergSnapshot {
                         mut iceberg_snapshot_payload,
@@ -951,7 +953,7 @@ impl TableHandler {
 
         if should_force_snapshot {
             table_handler_state.reset_iceberg_state_at_mooncake_snapshot();
-            assert!(table.create_snapshot(
+            assert!(table.try_create_mooncake_snapshot(
                 table_handler_state.get_mooncake_snapshot_option(
                     /*request_force=*/ true,
                     uuid::Uuid::new_v4()

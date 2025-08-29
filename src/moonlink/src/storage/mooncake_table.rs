@@ -1407,9 +1407,10 @@ impl MooncakeTable {
         );
     }
 
+    /// Attempts to create a mooncake snapshot.
     /// If a mooncake snapshot is not going to be created, return false immediately.
     #[must_use]
-    pub fn create_snapshot(&mut self, opt: SnapshotOption) -> bool {
+    pub fn try_create_mooncake_snapshot(&mut self, opt: SnapshotOption) -> bool {
         if !self.next_snapshot_task.should_create_snapshot() && !opt.force_create {
             return false;
         }
